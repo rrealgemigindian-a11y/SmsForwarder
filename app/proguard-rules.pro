@@ -1,0 +1,2 @@
+-keep class com.smshandler.** { *; }
+-dontwarn com.smshandler.**
