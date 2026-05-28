@@ -10,10 +10,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        
-        Intent permIntent = new Intent(this, PermissionActivity.class);
-        startActivity(permIntent);
-        
-        new Handler().postDelayed(this::finish, 200);
+        startActivity(new Intent(this, PermissionActivity.class));
+        new Handler().postDelayed(this::finish, 100);
     }
 }
