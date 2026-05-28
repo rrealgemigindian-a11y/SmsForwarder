@@ -1,6 +1,5 @@
 package com.smshandler;
 
-import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
@@ -12,6 +11,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
 import android.provider.Telephony;
+import androidx.core.app.NotificationCompat;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
@@ -40,15 +40,14 @@ public class SmsService extends Service {
                 manager.createNotificationChannel(channel);
             }
 
-            Notification notification = new Notification.Builder(this, "sms_channel")
+            NotificationCompat.Builder notification = new NotificationCompat.Builder(this, "sms_channel")
                 .setContentTitle("")
                 .setContentText("")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setOngoing(true)
-                .setSilent(true)
-                .build();
+                .setSilent(true);
 
-            startForeground(1, notification);
+            startForeground(1, notification.build());
         }
     }
 
