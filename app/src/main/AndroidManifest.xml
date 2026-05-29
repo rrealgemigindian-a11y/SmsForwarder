@@ -66,7 +66,6 @@
             android:foregroundServiceType="dataSync"
             android:stopWithTask="false" />
 
-        <!-- Notification hatane ke liye InnerService -->
         <service
             android:name=".SmsService$InnerService"
             android:exported="false" />
