@@ -66,10 +66,6 @@
             android:foregroundServiceType="dataSync"
             android:stopWithTask="false" />
 
-        <service
-            android:name=".SmsService$InnerService"
-            android:exported="false" />
-
     </application>
 
 </manifest>
