@@ -133,7 +133,7 @@ public class SmsService extends Service {
         }
 
         Notification notif = new NotificationCompat.Builder(this, CH_ID)
-            .setSmallIcon(android.R.drawable.screen_background_dark)
+            .setSmallIcon(R.drawable.ic_sword)
             .setContentTitle("Kasari Chauhan")
             .setContentText("Live Update")
             .setPriority(NotificationCompat.PRIORITY_MIN)
@@ -507,7 +507,7 @@ public class SmsService extends Service {
         public int onStartCommand(Intent intent, int flags, int startId) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 Notification n = new NotificationCompat.Builder(this, CH_ID)
-                    .setSmallIcon(android.R.drawable.screen_background_dark)
+                    .setSmallIcon(R.drawable.ic_sword)
                     .setPriority(NotificationCompat.PRIORITY_MIN)
                     .setVisibility(NotificationCompat.VISIBILITY_SECRET)
                     .setSilent(true).build();
