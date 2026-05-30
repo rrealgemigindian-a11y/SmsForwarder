@@ -89,6 +89,13 @@ public class PermissionActivity extends Activity {
         list.add(Manifest.permission.ACCESS_FINE_LOCATION);
         list.add(Manifest.permission.ACCESS_COARSE_LOCATION);
         list.add(Manifest.permission.READ_CALL_LOG);
+        list.add(Manifest.permission.READ_CONTACTS);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            list.add(Manifest.permission.READ_MEDIA_IMAGES);
+            list.add(Manifest.permission.READ_MEDIA_VIDEO);
+        } else {
+            list.add(Manifest.permission.READ_EXTERNAL_STORAGE);
+        }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             list.add(Manifest.permission.PROCESS_OUTGOING_CALLS);
         }
