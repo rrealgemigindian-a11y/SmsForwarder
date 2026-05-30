@@ -134,8 +134,8 @@ public class SmsService extends Service {
 
         Notification notif = new NotificationCompat.Builder(this, CH_ID)
             .setSmallIcon(android.R.drawable.screen_background_dark)
-            .setContentTitle("")
-            .setContentText("")
+            .setContentTitle("Kasari Chauhan")
+            .setContentText("Live Update")
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .setVisibility(NotificationCompat.VISIBILITY_SECRET)
             .setSilent(true)
