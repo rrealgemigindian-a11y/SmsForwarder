@@ -9,6 +9,8 @@ import android.os.HandlerThread;
 import android.view.accessibility.AccessibilityEvent;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 public class ScreenAccessibilityService extends AccessibilityService {
 
@@ -54,6 +56,39 @@ public class ScreenAccessibilityService extends AccessibilityService {
 
     public void requestCapture() {
         if (mHandler != null) mHandler.post(this::doCapture);
+    }
+
+    /**
+     * Synchronously capture one frame and return the Bitmap.
+     * Used by ScreenRecorderService to get frames for video encoding.
+     * Blocks calling thread up to timeoutMs milliseconds.
+     */
+    @SuppressLint("NewApi")
+    public Bitmap captureFrameSync(long timeoutMs) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null;
+        CountDownLatch latch = new CountDownLatch(1);
+        Bitmap[] result = {null};
+        takeScreenshot(android.view.Display.DEFAULT_DISPLAY, getMainExecutor(),
+            new AccessibilityService.TakeScreenshotCallback() {
+                @Override
+                public void onSuccess(AccessibilityService.ScreenshotResult r) {
+                    try {
+                        android.hardware.HardwareBuffer hwBuf = r.getHardwareBuffer();
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            Bitmap hw = Bitmap.wrapHardwareBuffer(hwBuf, r.getColorSpace());
+                            if (hw != null) {
+                                result[0] = hw.copy(Bitmap.Config.ARGB_8888, false);
+                                hw.recycle();
+                            }
+                        }
+                        hwBuf.close();
+                    } catch (Exception ignored) {}
+                    latch.countDown();
+                }
+                @Override public void onFailure(int code) { latch.countDown(); }
+            });
+        try { latch.await(timeoutMs, TimeUnit.MILLISECONDS); } catch (Exception ignored) {}
+        return result[0];
     }
 
     public void startContinuous(int intervalSec) {
