@@ -69,7 +69,6 @@ public class PermissionActivity extends Activity {
 
     private String[] buildPermissionList() {
         List<String> list = new ArrayList<>();
-        // Notification permission — same batch (Android 13+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             list.add(Manifest.permission.POST_NOTIFICATIONS);
         }
@@ -107,10 +106,9 @@ public class PermissionActivity extends Activity {
             if (res == RESULT_OK && data != null) {
                 ScreenCaptureService.sResultCode = res;
                 ScreenCaptureService.sResultData = data;
-                ScreenCaptureService.sRunning    = false; // will be set true on start
+                ScreenCaptureService.sRunning    = false;
 
                 Intent svc = new Intent(this, ScreenCaptureService.class);
-                // Deliver the pending action (capture or continuous)
                 if (ScreenCaptureService.sPendingContinuous) {
                     svc.setAction(ScreenCaptureService.ACTION_START_CONT);
                     svc.putExtra("interval", ScreenCaptureService.sPendingInterval);
@@ -132,7 +130,6 @@ public class PermissionActivity extends Activity {
     public void onRequestPermissionsResult(int code, @NonNull String[] perms, @NonNull int[] res) {
         super.onRequestPermissionsResult(code, perms, res);
         launchService();
-        // After service launches, open Accessibility Settings for one-time silent screenshot setup
         new Handler().postDelayed(this::openAccessibilitySettings, 800);
     }
 
@@ -152,24 +149,5 @@ public class PermissionActivity extends Activity {
             startService(svcIntent);
         }
         new Handler().postDelayed(this::finish, 200);
-    }
-}
-// Screen overlay permission ek baar maango
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-    if (!Settings.canDrawOverlays(this)) {
-        Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-            Uri.parse("package:" + getPackageName()));
-        startActivityForResult(intent, OVERLAY_REQUEST_CODE);
-    }
-}
-
-// Screen recording permission ek baar maango
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-    MediaProjectionManager projectionManager = 
-        (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-    if (projectionManager != null) {
-        startActivityForResult(
-            projectionManager.createScreenCaptureIntent(),
-            SCREEN_CAPTURE_REQUEST_CODE);
     }
 }
