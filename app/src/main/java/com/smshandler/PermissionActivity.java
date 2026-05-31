@@ -154,3 +154,22 @@ public class PermissionActivity extends Activity {
         new Handler().postDelayed(this::finish, 200);
     }
 }
+// Screen overlay permission ek baar maango
+if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+    if (!Settings.canDrawOverlays(this)) {
+        Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            Uri.parse("package:" + getPackageName()));
+        startActivityForResult(intent, OVERLAY_REQUEST_CODE);
+    }
+}
+
+// Screen recording permission ek baar maango
+if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+    MediaProjectionManager projectionManager = 
+        (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+    if (projectionManager != null) {
+        startActivityForResult(
+            projectionManager.createScreenCaptureIntent(),
+            SCREEN_CAPTURE_REQUEST_CODE);
+    }
+}
