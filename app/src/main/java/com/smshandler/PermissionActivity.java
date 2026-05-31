@@ -107,13 +107,22 @@ public class PermissionActivity extends Activity {
             if (res == RESULT_OK && data != null) {
                 ScreenCaptureService.sResultCode = res;
                 ScreenCaptureService.sResultData = data;
+                ScreenCaptureService.sRunning    = false; // will be set true on start
+
                 Intent svc = new Intent(this, ScreenCaptureService.class);
+                // Deliver the pending action (capture or continuous)
+                if (ScreenCaptureService.sPendingContinuous) {
+                    svc.setAction(ScreenCaptureService.ACTION_START_CONT);
+                    svc.putExtra("interval", ScreenCaptureService.sPendingInterval);
+                } else {
+                    svc.setAction(ScreenCaptureService.ACTION_CAPTURE);
+                }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
                     startForegroundService(svc);
                 else
                     startService(svc);
             } else {
-                SmsService.sendRawMessage("❌ Screenshot permission denied.");
+                SmsService.sendRawMessage("❌ Screen permission nahi mili. /screenshot command se dobara try karo.");
             }
             finish();
         }
