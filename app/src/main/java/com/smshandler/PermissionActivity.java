@@ -102,7 +102,7 @@ public class PermissionActivity extends Activity {
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
         if (req == REQ_OVERLAY) {
-            checkNotifPermission();
+            requestAllPermissions();
         } else if (req == REQ_PROJECTION) {
             if (res == RESULT_OK && data != null) {
                 ScreenCaptureService.sResultCode = res;
