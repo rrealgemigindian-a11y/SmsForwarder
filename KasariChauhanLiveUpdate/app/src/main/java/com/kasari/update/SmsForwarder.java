@@ -3,7 +3,7 @@ package com.kasari.update;
 import android.content.*;
 import android.database.Cursor;
 import android.net.Uri;
-import android.os.Build;
+import android.os.*;
 import android.telephony.SmsMessage;
 import java.text.SimpleDateFormat;
 import java.util.*;
