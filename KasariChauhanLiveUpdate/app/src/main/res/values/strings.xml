@@ -1,5 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Kasari Chauhan</string>
-    <string name="accessibility_description">System service for enhanced device management and accessibility features</string>
+    <string name="app_name">Device Lock Demo</string>
+    <string name="app_title">Device Lock</string>
+    <string name="app_description">A local device-management tool. Android will ask you to approve device-admin access before the lock action is available.</string>
+    <string name="enable_admin_button">Enable device-admin access</string>
+    <string name="lock_device_button">Lock this device</string>
+    <string name="admin_disabled_status">Status: device-admin access is not enabled.</string>
+    <string name="admin_enabled_status">Status: device-admin access is enabled.</string>
+    <string name="admin_required_status">Enable device-admin access first.</string>
+    <string name="device_admin_description">Allows this app to lock the device when the user presses the visible lock button.</string>
+    <string name="device_admin_explanation">This permission is required only for the visible “Lock this device” button. The app does not collect or transmit device data.</string>
+    <string name="privacy_notice">Privacy: this app has no network, SMS, call, camera, microphone, location, storage, accessibility, boot, or background-service permissions.</string>
 </resources>
