@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">Kasari Chauhan</string>
-    <string name="app_title">Welcome</string>
-    <string name="app_description">This minimal app has no device controls. It does not lock your screen or collect and send your data.</string>
-</resources>
